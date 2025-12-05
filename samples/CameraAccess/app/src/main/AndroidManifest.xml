@@ -9,7 +9,7 @@ xmlns:tools="http://schemas.android.com/tools">
 
 <application
     android:allowBackup="false"
-    android:icon="@mipmap/ic_launcher"
+    android:icon="@mipmap/glasses"
     android:label="CameraAccess"
     android:supportsRtl="true"
     android:theme="@style/Theme.CameraAccess"
