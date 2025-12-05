@@ -55,6 +55,7 @@ android {
 }
 
 dependencies {
+  // Existing dependencies
   implementation(libs.androidx.activity.compose)
   implementation(platform(libs.androidx.compose.bom))
   implementation(libs.androidx.exifinterface)
@@ -66,6 +67,15 @@ dependencies {
   implementation(libs.mwdat.core)
   implementation(libs.mwdat.camera)
   implementation(libs.mwdat.mockdevice)
+
+  // New dependencies for server communication
+  implementation(libs.okhttp)
+  implementation(libs.retrofit)
+  implementation(libs.retrofit.gson)
+  implementation(libs.gson)
+  implementation(libs.kotlinx.coroutines.android)
+
+  // Testing
   androidTestImplementation(libs.androidx.ui.test.junit4)
   androidTestImplementation(libs.androidx.test.uiautomator)
   androidTestImplementation(libs.androidx.test.rules)

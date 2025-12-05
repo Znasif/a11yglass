@@ -9,42 +9,19 @@
 // NonStreamScreen - DAT Device Selection and Setup
 //
 // This screen demonstrates DAT device management and pre-streaming setup. It handles device
-// registration status, camera permissions, and stream readiness.
+// registration status, camera permissions, stream readiness, and server connection.
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.systemBarsPadding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.LinkOff
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Text
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.rememberModalBottomSheetState
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -58,7 +35,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.meta.wearable.dat.core.types.Permission
 import com.meta.wearable.dat.core.types.PermissionStatus
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.R
-import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.network.ConnectionState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.components.ProcessorSelector
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.components.ServerUrlInput
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.components.StatusBar
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.Wearables.WearablesViewModel
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -68,147 +49,300 @@ fun NonStreamScreen(
     onRequestWearablesPermission: suspend (Permission) -> PermissionStatus,
     modifier: Modifier = Modifier,
 ) {
-  val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-  val gettingStartedSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
-  val scope = rememberCoroutineScope()
-  var dropdownExpanded by remember { mutableStateOf(false) }
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val gettingStartedSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+    val scope = rememberCoroutineScope()
+    var dropdownExpanded by remember { mutableStateOf(false) }
+    val scrollState = rememberScrollState()
 
-  MaterialTheme(colorScheme = darkColorScheme()) {
-    Box(
-        modifier = modifier.fillMaxSize().background(Color.Black).padding(all = 24.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-      Box(modifier = Modifier.align(Alignment.TopEnd).systemBarsPadding()) {
-        IconButton(onClick = { dropdownExpanded = true }) {
-          Icon(
-              imageVector = Icons.Default.LinkOff,
-              contentDescription = "DisconnectIcon",
-              tint = Color.White,
-              modifier = Modifier.size(28.dp),
-          )
-        }
-
-        DropdownMenu(
-            expanded = dropdownExpanded,
-            onDismissRequest = { dropdownExpanded = false },
+    MaterialTheme(colorScheme = darkColorScheme()) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .background(Color.Black)
         ) {
-          DropdownMenuItem(
-              text = {
-                Text(
-                    stringResource(R.string.unregister_button_title),
-                    color = AppColor.Red,
-                )
-              },
-              onClick = {
-                viewModel.startUnregistration()
-                dropdownExpanded = false
-              },
-              modifier = Modifier.height(30.dp),
-          )
-        }
-      }
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 24.dp)
+                    .padding(top = 16.dp, bottom = 100.dp)
+                    .verticalScroll(scrollState),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Top bar with disconnect button
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .systemBarsPadding(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    Box {
+                        IconButton(onClick = { dropdownExpanded = true }) {
+                            Icon(
+                                imageVector = Icons.Default.LinkOff,
+                                contentDescription = "Disconnect",
+                                tint = Color.White,
+                                modifier = Modifier.size(28.dp)
+                            )
+                        }
 
-      Column(
-          horizontalAlignment = Alignment.CenterHorizontally,
-          verticalArrangement = Arrangement.spacedBy(8.dp),
-      ) {
-        Icon(
-            painter = painterResource(id = R.drawable.camera_access_icon),
-            contentDescription = stringResource(R.string.camera_access_icon_description),
-            tint = Color.White,
-            modifier = Modifier.size(80.dp * LocalDensity.current.density),
-        )
-        Text(
-            text = stringResource(R.string.non_stream_screen_title),
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center,
-            color = Color.White,
-        )
-        Text(
-            text = stringResource(R.string.non_stream_screen_description),
-            textAlign = TextAlign.Center,
-            color = Color.White,
-        )
-      }
-
-      // Start Streaming Button
-      SwitchButton(
-          label = stringResource(R.string.stream_button_title),
-          onClick = { viewModel.navigateToStreaming(onRequestWearablesPermission) },
-          enabled = uiState.devices.isNotEmpty(),
-          modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding(),
-      )
-
-      // Getting Started Sheet
-      if (uiState.isGettingStartedSheetVisible) {
-        ModalBottomSheet(
-            onDismissRequest = { viewModel.hideGettingStartedSheet() },
-            sheetState = gettingStartedSheetState,
-        ) {
-          GettingStartedSheetContent(
-              onContinue = {
-                scope.launch {
-                  gettingStartedSheetState.hide()
-                  viewModel.hideGettingStartedSheet()
+                        DropdownMenu(
+                            expanded = dropdownExpanded,
+                            onDismissRequest = { dropdownExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        stringResource(R.string.unregister_button_title),
+                                        color = AppColor.Red
+                                    )
+                                },
+                                onClick = {
+                                    viewModel.startUnregistration()
+                                    dropdownExpanded = false
+                                },
+                                modifier = Modifier.height(40.dp)
+                            )
+                        }
+                    }
                 }
-              }
-          )
+
+                // App icon and title
+                Icon(
+                    painter = painterResource(id = R.drawable.camera_access_icon),
+                    contentDescription = stringResource(R.string.camera_access_icon_description),
+                    tint = Color.White,
+                    modifier = Modifier.size(60.dp * LocalDensity.current.density)
+                )
+
+                Text(
+                    text = stringResource(R.string.non_stream_screen_title),
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    color = Color.White
+                )
+
+                // Status bar
+                StatusBar(
+                    statusMessage = uiState.lastStatusMessage,
+                    errorMessage = uiState.recentError,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // Server settings card
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color(0xFF1A1A2E)
+                    ),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Text(
+                            text = "Server Settings",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White
+                        )
+
+                        // Server URL input
+                        ServerUrlInput(
+                            serverUrl = uiState.serverUrl,
+                            connectionState = uiState.connectionState,
+                            isFetchingProcessors = uiState.isFetchingProcessors,
+                            onUrlChange = { viewModel.setServerUrl(it) },
+                            onConnect = { viewModel.connectToServer() },
+                            onDisconnect = { viewModel.disconnectFromServer() },
+                            onFetchProcessors = { viewModel.fetchProcessors() }
+                        )
+
+                        // Processor selector
+                        ProcessorSelector(
+                            processors = uiState.processors,
+                            selectedProcessorId = uiState.selectedProcessorId,
+                            onProcessorSelected = { viewModel.selectProcessor(it) },
+                            enabled = uiState.isConnectedToServer
+                        )
+                    }
+                }
+
+                // Device status card
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color(0xFF1A1A2E)
+                    ),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Device Status",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White
+                        )
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            val deviceCount = uiState.devices.size
+                            val statusColor = if (deviceCount > 0) AppColor.Green else AppColor.Yellow
+
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .background(statusColor, RoundedCornerShape(4.dp))
+                            )
+
+                            Text(
+                                text = if (deviceCount > 0) {
+                                    "$deviceCount device(s) connected"
+                                } else {
+                                    "No devices connected"
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Color.White.copy(alpha = 0.8f)
+                            )
+                        }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            val serverColor = if (uiState.isConnectedToServer) AppColor.Green else Color.Gray
+
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .background(serverColor, RoundedCornerShape(4.dp))
+                            )
+
+                            Text(
+                                text = when (uiState.connectionState) {
+                                    is ConnectionState.Connected -> "Server connected"
+                                    is ConnectionState.Connecting -> "Connecting to server..."
+                                    is ConnectionState.Error -> "Server connection error"
+                                    else -> "Server not connected"
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Color.White.copy(alpha = 0.8f)
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.weight(1f))
+            }
+
+            // Start Streaming Button
+            SwitchButton(
+                label = stringResource(R.string.stream_button_title),
+                onClick = { viewModel.navigateToStreaming(onRequestWearablesPermission) },
+                enabled = uiState.canStartStreaming,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 24.dp)
+                    .navigationBarsPadding()
+                    .padding(bottom = 16.dp)
+            )
+
+            // Getting Started Sheet
+            if (uiState.isGettingStartedSheetVisible) {
+                ModalBottomSheet(
+                    onDismissRequest = { viewModel.hideGettingStartedSheet() },
+                    sheetState = gettingStartedSheetState
+                ) {
+                    GettingStartedSheetContent(
+                        onContinue = {
+                            scope.launch {
+                                gettingStartedSheetState.hide()
+                                viewModel.hideGettingStartedSheet()
+                            }
+                        }
+                    )
+                }
+            }
         }
-      }
     }
-  }
 }
 
 @Composable
-private fun GettingStartedSheetContent(onContinue: () -> Unit, modifier: Modifier = Modifier) {
-  Column(
-      modifier = modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 24.dp),
-      horizontalAlignment = Alignment.CenterHorizontally,
-      verticalArrangement = Arrangement.spacedBy(24.dp),
-  ) {
-    Text(
-        text = stringResource(R.string.getting_started_title),
-        style = MaterialTheme.typography.titleLarge,
-        fontWeight = FontWeight.SemiBold,
-        textAlign = TextAlign.Center,
-    )
-
+private fun GettingStartedSheetContent(
+    onContinue: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     Column(
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-        modifier = Modifier.fillMaxWidth().padding(8.dp).padding(bottom = 16.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp)
+            .padding(bottom = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(24.dp)
     ) {
-      TipItem(
-          iconResId = R.drawable.video_icon,
-          text = stringResource(R.string.getting_started_tip_permission),
-      )
-      TipItem(
-          iconResId = R.drawable.tap_icon,
-          text = stringResource(R.string.getting_started_tip_photo),
-      )
-      TipItem(
-          iconResId = R.drawable.smart_glasses_icon,
-          text = stringResource(R.string.getting_started_tip_led),
-      )
-    }
+        Text(
+            text = stringResource(R.string.getting_started_title),
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center
+        )
 
-    SwitchButton(
-        label = stringResource(R.string.getting_started_continue),
-        onClick = onContinue,
-        modifier = Modifier.navigationBarsPadding(),
-    )
-  }
+        Column(
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp)
+                .padding(bottom = 16.dp)
+        ) {
+            TipItem(
+                iconResId = R.drawable.video_icon,
+                text = stringResource(R.string.getting_started_tip_permission)
+            )
+            TipItem(
+                iconResId = R.drawable.tap_icon,
+                text = stringResource(R.string.getting_started_tip_photo)
+            )
+            TipItem(
+                iconResId = R.drawable.smart_glasses_icon,
+                text = stringResource(R.string.getting_started_tip_led)
+            )
+        }
+
+        SwitchButton(
+            label = stringResource(R.string.getting_started_continue),
+            onClick = onContinue,
+            modifier = Modifier.navigationBarsPadding()
+        )
+    }
 }
 
 @Composable
-private fun TipItem(iconResId: Int, text: String, modifier: Modifier = Modifier) {
-  Row(modifier = modifier.fillMaxWidth()) {
-    Icon(
-        painter = painterResource(id = iconResId),
-        contentDescription = "Getting started tip icon",
-        modifier = Modifier.padding(start = 4.dp, top = 4.dp).width(24.dp),
-    )
-    Spacer(modifier = Modifier.width(10.dp))
-    Text(text = text)
-  }
+private fun TipItem(
+    iconResId: Int,
+    text: String,
+    modifier: Modifier = Modifier
+) {
+    Row(modifier = modifier.fillMaxWidth()) {
+        Icon(
+            painter = painterResource(id = iconResId),
+            contentDescription = "Getting started tip icon",
+            modifier = Modifier
+                .padding(start = 4.dp, top = 4.dp)
+                .width(24.dp)
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(text = text)
+    }
 }

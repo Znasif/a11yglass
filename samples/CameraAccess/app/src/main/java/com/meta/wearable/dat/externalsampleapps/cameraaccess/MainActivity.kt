@@ -11,15 +11,17 @@
 // This is the main entry point for the CameraAccess sample application that demonstrates how to use
 // the Meta Wearables Device Access Toolkit (DAT) to:
 // - Initialize the DAT SDK
-// - Handle device permissions (Bluetooth, Internet)
+// - Handle device permissions (Bluetooth, Internet, Audio)
 // - Request camera permissions from wearable devices (Ray-Ban Meta glasses)
 // - Stream video and capture photos from connected wearable devices
+// - Stream audio and receive processed responses from server
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess
 
 import android.Manifest.permission.BLUETOOTH
 import android.Manifest.permission.BLUETOOTH_CONNECT
 import android.Manifest.permission.INTERNET
+import android.Manifest.permission.RECORD_AUDIO
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -30,75 +32,99 @@ import com.meta.wearable.dat.core.Wearables
 import com.meta.wearable.dat.core.types.Permission
 import com.meta.wearable.dat.core.types.PermissionStatus
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.CameraAccessScaffold
-import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
-import kotlin.coroutines.resume
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.Wearables.WearablesViewModel
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 class MainActivity : ComponentActivity() {
-  companion object {
-    // Required Android permissions for the DAT SDK to function properly
-    val PERMISSIONS: Array<String> = arrayOf(BLUETOOTH, BLUETOOTH_CONNECT, INTERNET)
-  }
-
-  val viewModel: WearablesViewModel by viewModels()
-
-  private var permissionContinuation: CancellableContinuation<PermissionStatus>? = null
-  private val permissionMutex = Mutex()
-  // Requesting wearable device permissions via the Meta AI app
-  private val permissionsResultLauncher =
-      registerForActivityResult(Wearables.RequestPermissionContract()) { result ->
-        permissionContinuation?.resume(result)
-        permissionContinuation = null
-      }
-
-  // Convenience method to make a permission request in a sequential manner
-  // Uses a Mutex to ensure requests are processed one at a time, preventing race conditions
-  suspend fun requestWearablesPermission(permission: Permission): PermissionStatus {
-    return permissionMutex.withLock {
-      suspendCancellableCoroutine { continuation ->
-        permissionContinuation = continuation
-        continuation.invokeOnCancellation { permissionContinuation = null }
-        permissionsResultLauncher.launch(permission)
-      }
-    }
-  }
-
-  override fun onCreate(savedInstanceState: Bundle?) {
-    super.onCreate(savedInstanceState)
-    enableEdgeToEdge()
-
-    // First, ensure the app has necessary Android permissions
-    checkPermissions {
-      // Initialize the DAT SDK once the permissions are granted
-      // This is REQUIRED before using any Wearables APIs
-      Wearables.initialize(this)
-
-      // Start observing Wearables state after SDK is initialized
-      viewModel.startMonitoring()
+    companion object {
+        // Required Android permissions for the DAT SDK and app to function properly
+        val PERMISSIONS: Array<String> = arrayOf(
+            BLUETOOTH, 
+            BLUETOOTH_CONNECT, 
+            INTERNET,
+            RECORD_AUDIO  // Added for audio streaming to server
+        )
     }
 
-    setContent {
-      CameraAccessScaffold(
-          viewModel = viewModel,
-          onRequestWearablesPermission = ::requestWearablesPermission,
-      )
-    }
-  }
+    val viewModel: WearablesViewModel by viewModels()
 
-  fun checkPermissions(onPermissionsGranted: () -> Unit) {
-    registerForActivityResult(RequestMultiplePermissions()) { permissionsResult ->
-          val granted = permissionsResult.entries.all { it.value }
-          if (granted) {
-            onPermissionsGranted()
-          } else {
-            viewModel.setRecentError(
-                "Allow All Permissions (Bluetooth, Bluetooth Connect, Internet)"
-            )
-          }
+    private var permissionContinuation: CancellableContinuation<PermissionStatus>? = null
+    private val permissionMutex = Mutex()
+    
+    // Requesting wearable device permissions via the Meta AI app
+    private val permissionsResultLauncher =
+        registerForActivityResult(Wearables.RequestPermissionContract()) { result ->
+            permissionContinuation?.resume(result, null)
+            permissionContinuation = null
         }
-        .launch(PERMISSIONS)
-  }
+
+    // Convenience method to make a permission request in a sequential manner
+    // Uses a Mutex to ensure requests are processed one at a time, preventing race conditions
+    suspend fun requestWearablesPermission(permission: Permission): PermissionStatus {
+        return permissionMutex.withLock {
+            suspendCancellableCoroutine { continuation ->
+                permissionContinuation = continuation
+                continuation.invokeOnCancellation { permissionContinuation = null }
+                permissionsResultLauncher.launch(permission)
+            }
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+
+        // First, ensure the app has necessary Android permissions
+        checkPermissions {
+            // Initialize the DAT SDK once the permissions are granted
+            // This is REQUIRED before using any Wearables APIs
+            Wearables.initialize(this)
+
+            // Start observing Wearables state after SDK is initialized
+            viewModel.startMonitoring()
+        }
+
+        setContent {
+            CameraAccessScaffold(
+                viewModel = viewModel,
+                onRequestWearablesPermission = ::requestWearablesPermission,
+            )
+        }
+    }
+
+    fun checkPermissions(onPermissionsGranted: () -> Unit) {
+        registerForActivityResult(RequestMultiplePermissions()) { permissionsResult ->
+            val granted = permissionsResult.entries.all { it.value }
+            if (granted) {
+                onPermissionsGranted()
+            } else {
+                // Check which permissions were denied
+                val deniedPermissions = permissionsResult.entries
+                    .filter { !it.value }
+                    .map { it.key }
+                    .joinToString(", ") { permission ->
+                        when (permission) {
+                            BLUETOOTH -> "Bluetooth"
+                            BLUETOOTH_CONNECT -> "Bluetooth Connect"
+                            INTERNET -> "Internet"
+                            RECORD_AUDIO -> "Microphone"
+                            else -> permission
+                        }
+                    }
+                
+                viewModel.setRecentError(
+                    "Please allow permissions: $deniedPermissions"
+                )
+            }
+        }.launch(PERMISSIONS)
+    }
+    
+    override fun onDestroy() {
+        super.onDestroy()
+        // Clean up server repository when activity is destroyed
+        viewModel.serverRepository.cleanup()
+    }
 }
