@@ -1,106 +1,59 @@
-# Meta Wearables Device Access Toolkit for Android
+# Ray-Ban Meta Glasses → Android WhatsAI
 
-[![Maven](https://img.shields.io/badge/Maven-0.2.1-brightgreen?logo=apachemaven)](https://github.com/orgs/facebook/packages?repo_name=meta-wearables-dat-android)
-[![Docs](https://img.shields.io/badge/API_Reference-0.2-blue?logo=meta)](https://wearables.developer.meta.com/docs/reference/android/dat/0.2)
+An open-source Android app that connects Ray-Ban Meta smart glasses to **your own** multimodal AI server (e.g., LLaVA/Gemma/Qwen-VL server) instead of Meta AI.
 
-The Meta Wearables Device Access Toolkit enables developers to utilize Meta's AI glasses to build hands-free wearable experiences into their mobile applications.
-By integrating this SDK, developers can reliably connect to Meta's AI glasses and leverage capabilities like video streaming and photo capture.
+Bypasses Meta’s cloud AI and streams live video + audio directly from the glasses to your self-hosted backend via WebSocket + REST.
 
-The Wearables Device Access Toolkit is in developer preview.
-Developers can access our SDK and documentation, test on supported AI glasses, and create organizations and release channels to share with test users.
+## Features
 
-## Documentation & Community
+- Full Meta Wearables DAT SDK integration (camera stream, photo capture, device state)
+- Configurable WebSocket connection to your server (ws:// or wss://)
+- Processor discovery (/processors endpoint) with dropdown selector
+- ~10 FPS JPEG frame streaming (base64) from glasses camera
+- 24 kHz mono PCM live microphone streaming
+- Real-time processed frame display from server
+- Gemini-style audio response playback
+- Queue-based Android TTS fallback with dynamic rate & mute control
+- Connection status, streaming indicators, response overlay
 
-Find our full [developer documentation](https://wearables.developer.meta.com/docs/develop/) on the Wearables Developer Center.
+## Files Added/Modified (Full Replication of Web Client)
 
-You can find an overview of the Wearables Developer Center [here](https://wearables.developer.meta.com/).
-Create an account to stay informed of all updates, report bugs and register your organization.
-Set up a project and release channel to share your integration with test users.
-
-For help, discussion about best practices or to suggest feature ideas visit our [discussions forum](https://github.com/facebook/meta-wearables-dat-android/discussions).
-
-See the [changelog](CHANGELOG.md) for the latest updates.
-
-## Including the SDK in your project
-
-You can add the SDK to your Gradle project with these two steps:
-
-### 1. Adding the repository definition to `build.gradle.kts` or `settings.gradle.kts`
-
-```kotlin
-repositories {
-    maven {
-        url = uri("https://maven.pkg.github.com/facebook/meta-wearables-dat-android")
-        credentials {
-            username = "" // not needed
-            password = "<access-token>"
-        }
-    }
-}
+```
+gradle/libs.versions.toml          → OkHttp, Retrofit, Gson, Coroutines
+app/build.gradle.kts               → Network & audio dependencies
+AndroidManifest.xml                → RECORD_AUDIO + cleartext traffic
+network/models/                    → ProcessorInfo, OutgoingMessages, ServerResponse
+network/WebSocketManager.kt        → WebSocket handling
+network/ServerApiService.kt        → Retrofit REST interface
+network/ServerRepository.kt        → Unified repo
+audio/AudioStreamManager.kt        → 24 kHz mic capture
+audio/AudioPlaybackManager.kt      → Gemini audio playback
+audio/TextToSpeechManager.kt       → Queued TTS
+wearables/* & stream/*             → ViewModels + UI state updates
+ui/components/                     → ServerUrlInput, ProcessorSelector, ResponseTextDisplay
+ui/NonStreamScreen.kt & StreamScreen.kt → Settings + streaming UI
+MainActivity.kt                    → Permission handling
 ```
 
-### 2. Adding the required components as dependencies in the app's `build.gradle.kts`
+## Quick Start
 
-```kotlin
-dependencies {
-    implementation("com.meta.wearable:mwdat-core:0.2.1")
-    implementation("com.meta.wearable:mwdat-camera:0.2.1")
-    implementation("com.meta.wearable:mwdat-mockdevice:0.2.1")
-}
-```
+1. Clone & open in Android Studio
+2. Register your Ray-Ban Meta glasses in the Meta View app
+3. Build and install the APK
+4. Setup server by following: https://github.com/Znasif/HackTemplate instructions. Enter your server URL (e.g. `ws://192.168.1.100:8000/ws`)
+5. Tap Connect → Fetch Processors → Select processor
+6. Start Streaming → Start Server (video) → Start Audio (mic)
 
-## Developer Terms
+## Requirements
 
-- By using the Wearables Device Access Toolkit, you agree to our [Meta Wearables Developer Terms](https://wearables.developer.meta.com/terms),
-  including our [Acceptable Use Policy](https://wearables.developer.meta.com/acceptable-use-policy).
-- By enabling Meta integrations, including through this SDK, Meta may collect information about how users' Meta devices communicate with your app.
-  Meta will use this information collected in accordance with our [Privacy Policy](https://www.meta.com/legal/privacy-policy/).
-- You may limit Meta's access to data from users' devices by following the instructions below.
-
-### Opting out of data collection
-
-To configure analytics settings in your Meta Wearables DAT Android app, add the following `<meta-data>` element to your
-app's `AndroidManifest.xml` file within the `<application>` element:
-
-```xml
-<meta-data
-    android:name="com.meta.wearable.mwdat.ANALYTICS_OPT_OUT"
-    android:value="true"
-    />
-```
-
-**Default behavior:** If the `ANALYTICS_OPT_OUT` metadata is missing or set to `false`, analytics are enabled
-(i.e., you are **not** opting out). Set to `true` to disable data collection.
-
-**Note:** In other words, this setting controls whether or not you're opting out of analytics:
-
-- `true` = Opt out (analytics **disabled**)
-- `false` = Opt in (analytics **enabled**)
-
-**Complete example:**
-
-```xml
-<application
-    android:name=".MyApplication"
-    android:label="MyApp"
-    android:icon="@mipmap/app_launcher">
-
-    <!-- Required: Your application ID from Wearables Developer Center -->
-    <meta-data
-        android:name="com.meta.wearable.mwdat.APPLICATION_ID"
-        android:value="your_app_id_here"
-        />
-
-    <!-- Optional: Disable analytics -->
-    <meta-data
-        android:name="com.meta.wearable.mwdat.ANALYTICS_OPT_OUT"
-        android:value="true"
-        />
-
-    <!-- Your activities and other components -->
-</application>
-```
+- Ray-Ban Meta glasses (firmware ≥ 8.0 recommended)
+- Android device with Meta View app installed and glasses paired
+- Your own multimodal server exposing:
+  - GET /processors
+  - WebSocket /ws accepting JSON frames + binary audio
 
 ## License
 
-See the [LICENSE](LICENSE) file.
+MIT (same as original Meta Wearables DAT SDK) – see LICENSE
+
+Ready for further features (e.g. photo capture trigger, haptic feedback, offline mode). Let me know what to add next!
