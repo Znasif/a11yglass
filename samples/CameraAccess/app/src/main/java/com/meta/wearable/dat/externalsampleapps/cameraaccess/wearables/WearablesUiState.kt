@@ -10,7 +10,7 @@
 //
 // This data class aggregates DAT API state for the UI layer
 
-package com.meta.wearable.dat.externalsampleapps.cameraaccess.Wearables
+package com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables
 
 import com.meta.wearable.dat.core.types.DeviceIdentifier
 import com.meta.wearable.dat.core.types.RegistrationState
@@ -30,7 +30,7 @@ data class WearablesUiState(
     val isGettingStartedSheetVisible: Boolean = false,
     
     // Server connection state
-    val serverUrl: String = "ws://192.168.1.100:8000/ws",
+    val serverUrl: String = "wss://w4cdrdoe55szp3-8000.proxy.runpod.net/ws",
     val connectionState: ConnectionState = ConnectionState.Disconnected,
     val isConnectedToServer: Boolean = false,
     

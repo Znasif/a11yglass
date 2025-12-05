@@ -39,7 +39,7 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.network.ConnectionS
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.components.ProcessorSelector
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.components.ServerUrlInput
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.components.StatusBar
-import com.meta.wearable.dat.externalsampleapps.cameraaccess.Wearables.WearablesViewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)

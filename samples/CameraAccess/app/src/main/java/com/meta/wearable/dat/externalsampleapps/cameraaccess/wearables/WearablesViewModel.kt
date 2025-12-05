@@ -15,7 +15,7 @@
 // - Integration with MockDeviceKit for testing
 // - Server connection and processor management
 
-package com.meta.wearable.dat.externalsampleapps.cameraaccess.Wearables
+package com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables
 
 import android.app.Application
 import android.util.Log

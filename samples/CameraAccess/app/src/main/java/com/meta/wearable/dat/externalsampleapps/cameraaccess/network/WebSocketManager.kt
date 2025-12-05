@@ -30,44 +30,52 @@ import java.util.concurrent.TimeUnit
  * Handles sending video frames and audio chunks, and receiving processed responses.
  */
 class WebSocketManager {
-    
+
     companion object {
         private const val TAG = "WebSocketManager"
         private const val NORMAL_CLOSURE_STATUS = 1000
         private const val PING_INTERVAL_SECONDS = 30L
     }
-    
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val gson = Gson()
-    
+
     private var webSocket: WebSocket? = null
     private var serverUrl: String = ""
-    
+
     private val client = OkHttpClient.Builder()
         .pingInterval(PING_INTERVAL_SECONDS, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .connectTimeout(30, TimeUnit.SECONDS)
         .build()
-    
+
     // Connection state
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
-    
-    // Incoming messages
+
+    // Incoming messages - use small buffer, we mainly care about latest
     private val _incomingMessages = MutableSharedFlow<ServerResponse>(
         replay = 0,
-        extraBufferCapacity = 64
+        extraBufferCapacity = 1  // Reduced from 64 - we only need latest
     )
     val incomingMessages: SharedFlow<ServerResponse> = _incomingMessages.asSharedFlow()
-    
+
+    // Latest image frame - StateFlow ensures only latest is kept
+    private val _latestImageFrame = MutableStateFlow<String?>(null)
+    val latestImageFrame: StateFlow<String?> = _latestImageFrame.asStateFlow()
+
+    // Latest text response
+    private val _latestTextResponse = MutableStateFlow<String?>(null)
+    val latestTextResponse: StateFlow<String?> = _latestTextResponse.asStateFlow()
+
     // Parsed responses for easier consumption
     private val _parsedResponses = MutableSharedFlow<ParsedResponse>(
         replay = 0,
-        extraBufferCapacity = 64
+        extraBufferCapacity = 1  // Reduced from 64
     )
     val parsedResponses: SharedFlow<ParsedResponse> = _parsedResponses.asSharedFlow()
-    
+
     /**
      * Connect to the WebSocket server.
      * @param url The WebSocket URL (e.g., "ws://192.168.1.100:8000/ws")
@@ -78,18 +86,18 @@ class WebSocketManager {
             Log.w(TAG, "Already connected or connecting")
             return
         }
-        
+
         serverUrl = url
         _connectionState.value = ConnectionState.Connecting
-        
+
         val request = Request.Builder()
             .url(url)
             .build()
-        
+
         webSocket = client.newWebSocket(request, createWebSocketListener())
         Log.d(TAG, "Connecting to WebSocket: $url")
     }
-    
+
     /**
      * Disconnect from the WebSocket server.
      */
@@ -99,7 +107,7 @@ class WebSocketManager {
         _connectionState.value = ConnectionState.Disconnected
         Log.d(TAG, "Disconnected from WebSocket")
     }
-    
+
     /**
      * Send a video frame to the server.
      * @param imageBase64 Base64 encoded JPEG image (with or without data URL prefix)
@@ -110,16 +118,16 @@ class WebSocketManager {
             Log.w(TAG, "Cannot send frame: not connected")
             return
         }
-        
+
         val message = FrameMessage(
             image = imageBase64,
             processor = processorId
         )
-        
+
         val json = gson.toJson(message)
         webSocket?.send(json)
     }
-    
+
     /**
      * Send an audio chunk to the server.
      * @param audioData Raw PCM audio data
@@ -129,14 +137,14 @@ class WebSocketManager {
             Log.w(TAG, "Cannot send audio: not connected")
             return
         }
-        
+
         val base64Audio = Base64.encodeToString(audioData, Base64.NO_WRAP)
         val message = AudioStreamMessage(audioChunk = base64Audio)
-        
+
         val json = gson.toJson(message)
         webSocket?.send(json)
     }
-    
+
     /**
      * Send audio stream stop message to the server.
      */
@@ -145,30 +153,30 @@ class WebSocketManager {
             Log.w(TAG, "Cannot send audio stop: not connected")
             return
         }
-        
+
         val message = AudioStreamStopMessage()
         val json = gson.toJson(message)
         webSocket?.send(json)
         Log.d(TAG, "Sent audio stream stop")
     }
-    
+
     /**
      * Check if connected to the server.
      */
     fun isConnected(): Boolean = _connectionState.value is ConnectionState.Connected
-    
+
     private fun createWebSocketListener() = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             Log.d(TAG, "WebSocket connection opened")
             _connectionState.value = ConnectionState.Connected
         }
-        
+
         override fun onMessage(webSocket: WebSocket, text: String) {
             scope.launch {
                 try {
                     val response = gson.fromJson(text, ServerResponse::class.java)
                     _incomingMessages.emit(response)
-                    
+
                     // Parse and emit typed response
                     val parsed = parseResponse(response)
                     if (parsed != null) {
@@ -179,23 +187,23 @@ class WebSocketManager {
                 }
             }
         }
-        
+
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
             Log.d(TAG, "WebSocket closing: $code - $reason")
             webSocket.close(NORMAL_CLOSURE_STATUS, null)
         }
-        
+
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             Log.d(TAG, "WebSocket closed: $code - $reason")
             _connectionState.value = ConnectionState.Disconnected
         }
-        
+
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             Log.e(TAG, "WebSocket failure: ${t.message}")
             _connectionState.value = ConnectionState.Error(t.message ?: "Unknown error")
         }
     }
-    
+
     private fun parseResponse(response: ServerResponse): ParsedResponse? {
         return when {
             response.isAudioPlayback() -> {
@@ -207,14 +215,14 @@ class WebSocketManager {
                     isLastChunk = response.isLastChunk ?: true
                 )
             }
-            
+
             response.isSetProcessor() -> {
                 ParsedResponse.SetProcessor(
                     processorId = response.processorId ?: 0,
                     reason = response.reason
                 )
             }
-            
+
             response.status?.contains("audio") == true -> {
                 ParsedResponse.AudioRecordingStatus(
                     status = response.status,
@@ -222,26 +230,26 @@ class WebSocketManager {
                     filepath = response.filepath
                 )
             }
-            
+
             response.error != null -> {
                 ParsedResponse.Error(response.error)
             }
-            
+
             response.image != null || response.text != null -> {
                 ParsedResponse.ImageAndText(
                     image = response.image,
                     text = response.getTextAsString()
                 )
             }
-            
+
             response.status != null -> {
                 ParsedResponse.Status(response.status)
             }
-            
+
             else -> null
         }
     }
-    
+
     /**
      * Clean up resources.
      */

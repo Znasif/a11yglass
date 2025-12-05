@@ -32,7 +32,7 @@ import com.meta.wearable.dat.core.Wearables
 import com.meta.wearable.dat.core.types.Permission
 import com.meta.wearable.dat.core.types.PermissionStatus
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.CameraAccessScaffold
-import com.meta.wearable.dat.externalsampleapps.cameraaccess.Wearables.WearablesViewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex

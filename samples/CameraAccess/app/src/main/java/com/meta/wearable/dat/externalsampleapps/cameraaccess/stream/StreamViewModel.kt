@@ -47,7 +47,7 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.AudioPlayback
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.AudioStreamManager
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.TextToSpeechManager
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.network.models.ParsedResponse
-import com.meta.wearable.dat.externalsampleapps.cameraaccess.Wearables.WearablesViewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -101,8 +101,8 @@ class StreamViewModel(
         // Collect timer state
         timerJob = viewModelScope.launch {
             launch {
-                streamTimer.timerMode.collect { mode -> 
-                    _uiState.update { it.copy(timerMode = mode) } 
+                streamTimer.timerMode.collect { mode ->
+                    _uiState.update { it.copy(timerMode = mode) }
                 }
             }
 
@@ -125,9 +125,10 @@ class StreamViewModel(
 
         // Collect server responses
         serverResponseJob = viewModelScope.launch {
-            wearablesViewModel.serverRepository.parsedResponses.collect { response ->
-                handleServerResponse(response)
-            }
+            wearablesViewModel.serverRepository.parsedResponses
+                .collect { response ->
+                    handleServerResponse(response)
+                }
         }
 
         // Collect audio playback state
@@ -143,6 +144,19 @@ class StreamViewModel(
                 _uiState.update { it.copy(isAudioMuted = isMuted) }
             }
         }
+
+        // Clear processed frame when processor changes (discard old processor's frames)
+        viewModelScope.launch {
+            var lastProcessorId = -1
+            wearablesViewModel.uiState.collect { state ->
+                if (lastProcessorId != -1 && state.selectedProcessorId != lastProcessorId) {
+                    // Processor changed - clear old frame, TTS will naturally update with new responses
+                    _uiState.update { it.copy(processedFrame = null, responseText = "") }
+                    Log.d(TAG, "Processor changed from $lastProcessorId to ${state.selectedProcessorId}, cleared old frame")
+                }
+                lastProcessorId = state.selectedProcessorId
+            }
+        }
     }
 
     // ========== DAT Stream Methods ==========
@@ -152,18 +166,18 @@ class StreamViewModel(
         streamTimer.startTimer()
         videoJob?.cancel()
         stateJob?.cancel()
-        
+
         val streamSession =
             Wearables.startStreamSession(
                 getApplication(),
                 deviceSelector,
                 StreamConfiguration(videoQuality = VideoQuality.MEDIUM, 24),
             ).also { streamSession = it }
-        
-        videoJob = viewModelScope.launch { 
-            streamSession.videoStream.collect { handleVideoFrame(it) } 
+
+        videoJob = viewModelScope.launch {
+            streamSession.videoStream.collect { handleVideoFrame(it) }
         }
-        
+
         stateJob = viewModelScope.launch {
             streamSession.state.collect { currentState ->
                 val prevState = _uiState.value.streamSessionState
@@ -181,19 +195,19 @@ class StreamViewModel(
     fun stopStream() {
         stopServerStreaming()
         stopAudioStreaming()
-        
+
         videoJob?.cancel()
         videoJob = null
         stateJob?.cancel()
         stateJob = null
         frameStreamingJob?.cancel()
         frameStreamingJob = null
-        
+
         streamSession?.close()
         streamSession = null
         streamTimer.stopTimer()
         lastFrameBitmap = null
-        
+
         _uiState.update { INITIAL_STATE }
     }
 
@@ -213,11 +227,11 @@ class StreamViewModel(
             return
         }
 
-        _uiState.update { 
+        _uiState.update {
             it.copy(
                 isStreamingToServer = true,
                 statusMessage = "Streaming to server..."
-            ) 
+            )
         }
 
         // Start the frame streaming loop
@@ -229,7 +243,7 @@ class StreamViewModel(
                 delay(FRAME_DELAY_MS)
             }
         }
-        
+
         Log.d(TAG, "Started server streaming")
     }
 
@@ -239,15 +253,18 @@ class StreamViewModel(
     fun stopServerStreaming() {
         frameStreamingJob?.cancel()
         frameStreamingJob = null
-        
-        _uiState.update { 
+
+        // Stop any pending TTS (matches web client behavior)
+        ttsManager.stop()
+
+        _uiState.update {
             it.copy(
                 isStreamingToServer = false,
                 statusMessage = "Stopped streaming",
                 processedFrame = null
-            ) 
+            )
         }
-        
+
         Log.d(TAG, "Stopped server streaming")
     }
 
@@ -272,15 +289,15 @@ class StreamViewModel(
                 val outputStream = ByteArrayOutputStream()
                 bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, outputStream)
                 val jpegBytes = outputStream.toByteArray()
-                
+
                 // Create data URL (matching web client format)
                 val base64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
                 val dataUrl = "data:image/jpeg;base64,$base64"
-                
+
                 // Send to server
                 val processorId = wearablesViewModel.uiState.value.selectedProcessorId
                 wearablesViewModel.serverRepository.sendFrame(dataUrl, processorId)
-                
+
             } catch (e: Exception) {
                 Log.e(TAG, "Error sending frame: ${e.message}")
             }
@@ -314,11 +331,11 @@ class StreamViewModel(
         }
 
         if (started) {
-            _uiState.update { 
+            _uiState.update {
                 it.copy(
                     isAudioStreaming = true,
                     statusMessage = "Audio streaming started"
-                ) 
+                )
             }
             Log.d(TAG, "Started audio streaming")
         } else {
@@ -334,14 +351,14 @@ class StreamViewModel(
 
         audioStreamManager.stopRecording()
         wearablesViewModel.serverRepository.sendAudioStop()
-        
-        _uiState.update { 
+
+        _uiState.update {
             it.copy(
                 isAudioStreaming = false,
                 statusMessage = "Audio streaming stopped"
-            ) 
+            )
         }
-        
+
         Log.d(TAG, "Stopped audio streaming")
     }
 
@@ -374,19 +391,21 @@ class StreamViewModel(
                         _uiState.update { it.copy(processedFrame = bitmap) }
                     }
                 }
-                
+
                 // Handle text response
                 response.text?.let { text ->
                     if (text.isNotBlank()) {
                         _uiState.update { it.copy(responseText = text) }
                         wearablesViewModel.updateServerResponseText(text)
-                        
-                        // Speak the text if not muted
-                        ttsManager.speak(text)
+
+                        // Only speak if not muted (matches web client pattern)
+                        if (!_uiState.value.isAudioMuted) {
+                            ttsManager.speak(text)
+                        }
                     }
                 }
             }
-            
+
             is ParsedResponse.AudioPlayback -> {
                 // Add audio chunk to playback manager
                 audioPlaybackManager.addAudioChunk(
@@ -394,23 +413,23 @@ class StreamViewModel(
                     response.isLastChunk
                 )
             }
-            
+
             is ParsedResponse.SetProcessor -> {
                 // Server requested processor change
                 wearablesViewModel.selectProcessor(response.processorId)
-                _uiState.update { 
-                    it.copy(statusMessage = "Processor changed: ${response.reason ?: ""}") 
+                _uiState.update {
+                    it.copy(statusMessage = "Processor changed: ${response.reason ?: ""}")
                 }
             }
-            
+
             is ParsedResponse.Status -> {
                 _uiState.update { it.copy(statusMessage = response.message) }
             }
-            
+
             is ParsedResponse.Error -> {
                 _uiState.update { it.copy(errorMessage = response.message) }
             }
-            
+
             is ParsedResponse.AudioRecordingStatus -> {
                 _uiState.update { it.copy(statusMessage = response.status) }
             }
@@ -428,7 +447,7 @@ class StreamViewModel(
             } else {
                 imageData
             }
-            
+
             val bytes = Base64.decode(base64Data, Base64.DEFAULT)
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         } catch (e: Exception) {
@@ -441,8 +460,8 @@ class StreamViewModel(
 
     fun capturePhoto() {
         if (uiState.value.streamSessionState == StreamSessionState.STREAMING) {
-            viewModelScope.launch { 
-                streamSession?.capturePhoto()?.onSuccess { handlePhotoData(it) } 
+            viewModelScope.launch {
+                streamSession?.capturePhoto()?.onSuccess { handlePhotoData(it) }
             }
         }
     }
@@ -517,10 +536,10 @@ class StreamViewModel(
             }
 
         val bitmap = BitmapFactory.decodeByteArray(out, 0, out.size)
-        
+
         // Store for server streaming
         lastFrameBitmap = bitmap
-        
+
         _uiState.update { it.copy(videoFrame = bitmap) }
     }
 

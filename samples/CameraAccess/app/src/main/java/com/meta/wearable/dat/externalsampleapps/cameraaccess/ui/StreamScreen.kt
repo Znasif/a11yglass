@@ -40,7 +40,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.meta.wearable.dat.camera.types.StreamSessionState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.R
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.StreamViewModel
-import com.meta.wearable.dat.externalsampleapps.cameraaccess.Wearables.WearablesViewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.components.ProcessorSpinner
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 
 @Composable
 fun StreamScreen(
@@ -116,6 +117,14 @@ fun StreamScreen(
                 )
             }
 
+            // Processor selector spinner
+            ProcessorSpinner(
+                processors = wearablesUiState.processors,
+                selectedProcessorId = wearablesUiState.selectedProcessorId,
+                onProcessorSelected = { wearablesViewModel.selectProcessor(it) },
+                enabled = wearablesUiState.isConnectedToServer
+            )
+
             // Response text display
             if (streamUiState.responseText.isNotBlank()) {
                 Box(
@@ -163,17 +172,6 @@ fun StreamScreen(
                 .padding(bottom = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Processor info
-            wearablesUiState.selectedProcessor?.let { processor ->
-                Text(
-                    text = "Processor: ${processor.name}",
-                    color = Color.White.copy(alpha = 0.7f),
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.fillMaxWidth(),
-                    textAlign = TextAlign.Center
-                )
-            }
-
             // Main control buttons row
             Row(
                 modifier = Modifier.fillMaxWidth().height(56.dp),
@@ -330,7 +328,7 @@ private fun StatusChip(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
             .background(
-                if (isActive) activeColor.copy(alpha = 0.3f) 
+                if (isActive) activeColor.copy(alpha = 0.3f)
                 else Color.Gray.copy(alpha = 0.3f)
             )
             .padding(horizontal = 12.dp, vertical = 4.dp)

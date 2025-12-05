@@ -71,7 +71,7 @@ fun ServerUrlInput(
                 onValueChange = onUrlChange,
                 modifier = Modifier.weight(1f),
                 label = { Text("Server URL") },
-                placeholder = { Text("ws://192.168.1.100:8000/ws") },
+                placeholder = { Text("wss://w4cdrdoe55szp3-8000.proxy.runpod.net/ws") }, //ws://192.168.1.100:8000/ws
                 singleLine = true,
                 enabled = !isConnected && !isConnecting,
                 keyboardOptions = KeyboardOptions(
