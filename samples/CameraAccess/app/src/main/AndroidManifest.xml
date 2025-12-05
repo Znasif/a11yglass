@@ -17,7 +17,10 @@ xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Without Developer Mode, this key will need to be set with ID from app registered in Wearables Developer Center -->
     <meta-data android:name="com.meta.wearable.mwdat.APPLICATION_ID" android:value="700947806097080" />
-
+    <meta-data
+        android:name="com.meta.wearable.mwdat.ANALYTICS_OPT_OUT"
+        android:value="true"
+        />
     <activity
         android:name=".MainActivity"
         android:exported="true"
