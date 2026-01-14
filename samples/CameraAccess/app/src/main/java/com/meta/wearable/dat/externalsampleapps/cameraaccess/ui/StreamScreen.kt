@@ -144,6 +144,7 @@ fun StreamScreen(
                 }
             }
 
+
             // Error message
             streamUiState.errorMessage?.let { error ->
                 Box(

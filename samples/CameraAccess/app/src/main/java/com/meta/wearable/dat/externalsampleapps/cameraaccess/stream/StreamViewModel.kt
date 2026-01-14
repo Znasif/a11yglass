@@ -171,7 +171,7 @@ class StreamViewModel(
             Wearables.startStreamSession(
                 getApplication(),
                 deviceSelector,
-                StreamConfiguration(videoQuality = VideoQuality.MEDIUM, 24),
+                StreamConfiguration(videoQuality = VideoQuality.LOW, 2),
             ).also { streamSession = it }
 
         videoJob = viewModelScope.launch {
