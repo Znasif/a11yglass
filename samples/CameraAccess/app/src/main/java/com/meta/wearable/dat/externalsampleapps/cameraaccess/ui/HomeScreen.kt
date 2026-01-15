@@ -34,6 +34,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.R
@@ -42,6 +43,17 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.Wearables
 @Composable
 fun HomeScreen(
     viewModel: WearablesViewModel,
+    modifier: Modifier = Modifier,
+) {
+  HomeScreenContent(
+      onStartRegistration = { viewModel.startRegistration() },
+      modifier = modifier,
+  )
+}
+
+@Composable
+fun HomeScreenContent(
+    onStartRegistration: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
   Box(
@@ -93,11 +105,17 @@ fun HomeScreen(
       )
       SwitchButton(
           label = stringResource(R.string.register_button_title),
-          onClick = { viewModel.startRegistration() },
+          onClick = onStartRegistration,
           modifier = Modifier.navigationBarsPadding(),
       )
     }
   }
+}
+
+@Preview(showBackground = true)
+@Composable
+private fun HomeScreenPreview() {
+  HomeScreenContent(onStartRegistration = {})
 }
 
 @Composable

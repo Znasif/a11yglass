@@ -42,6 +42,10 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.R
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.StreamViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.components.ProcessorSpinner
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
+import android.graphics.Bitmap
+import androidx.compose.ui.tooling.preview.Preview
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.StreamUiState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesUiState
 
 @Composable
 fun StreamScreen(
@@ -61,6 +65,42 @@ fun StreamScreen(
 
     LaunchedEffect(Unit) { streamViewModel.startStream() }
 
+    StreamScreenContent(
+        streamUiState = streamUiState,
+        wearablesUiState = wearablesUiState,
+        onStartStream = { streamViewModel.startStream() },
+        onStopStream = {
+            streamViewModel.stopStream()
+            wearablesViewModel.navigateToDeviceSelection()
+        },
+        onProcessorSelected = { wearablesViewModel.selectProcessor(it) },
+        onToggleServerStreaming = { streamViewModel.toggleServerStreaming() },
+        onToggleAudioStreaming = { streamViewModel.toggleAudioStreaming() },
+        onToggleMute = { streamViewModel.toggleMute() },
+        onCycleTimerMode = { streamViewModel.cycleTimerMode() },
+        onCapturePhoto = { streamViewModel.capturePhoto() },
+        onSharePhoto = { streamViewModel.sharePhoto(it) },
+        onHideShareDialog = { streamViewModel.hideShareDialog() },
+        modifier = modifier
+    )
+}
+
+@Composable
+fun StreamScreenContent(
+    streamUiState: StreamUiState,
+    wearablesUiState: WearablesUiState,
+    onStartStream: () -> Unit,
+    onStopStream: () -> Unit,
+    onProcessorSelected: (Int) -> Unit,
+    onToggleServerStreaming: () -> Unit,
+    onToggleAudioStreaming: () -> Unit,
+    onToggleMute: () -> Unit,
+    onCycleTimerMode: () -> Unit,
+    onCapturePhoto: () -> Unit,
+    onSharePhoto: (Bitmap) -> Unit,
+    onHideShareDialog: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
         // Video frame display (prefer processed frame if streaming to server)
         streamUiState.displayFrame?.let { frame ->
@@ -68,7 +108,7 @@ fun StreamScreen(
                 bitmap = frame.asImageBitmap(),
                 contentDescription = stringResource(R.string.live_stream),
                 modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop,
+                contentScale = ContentScale.Inside,
             )
         }
 
@@ -121,7 +161,7 @@ fun StreamScreen(
             ProcessorSpinner(
                 processors = wearablesUiState.processors,
                 selectedProcessorId = wearablesUiState.selectedProcessorId,
-                onProcessorSelected = { wearablesViewModel.selectProcessor(it) },
+                onProcessorSelected = onProcessorSelected,
                 enabled = wearablesUiState.isConnectedToServer
             )
 
@@ -182,10 +222,7 @@ fun StreamScreen(
                 // Stop/Back button
                 SwitchButton(
                     label = stringResource(R.string.stop_stream_button_title),
-                    onClick = {
-                        streamViewModel.stopStream()
-                        wearablesViewModel.navigateToDeviceSelection()
-                    },
+                    onClick = onStopStream,
                     isDestructive = true,
                     modifier = Modifier.weight(1f),
                 )
@@ -193,12 +230,12 @@ fun StreamScreen(
                 // Timer button
                 TimerButton(
                     timerMode = streamUiState.timerMode,
-                    onClick = { streamViewModel.cycleTimerMode() },
+                    onClick = onCycleTimerMode,
                 )
 
                 // Photo capture button
                 CaptureButton(
-                    onClick = { streamViewModel.capturePhoto() },
+                    onClick = onCapturePhoto,
                 )
             }
 
@@ -210,7 +247,7 @@ fun StreamScreen(
             ) {
                 // Server streaming toggle
                 Button(
-                    onClick = { streamViewModel.toggleServerStreaming() },
+                    onClick = onToggleServerStreaming,
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = if (streamUiState.isStreamingToServer) {
@@ -238,7 +275,7 @@ fun StreamScreen(
 
                 // Audio streaming toggle
                 Button(
-                    onClick = { streamViewModel.toggleAudioStreaming() },
+                    onClick = onToggleAudioStreaming,
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = if (streamUiState.isAudioStreaming) {
@@ -266,7 +303,7 @@ fun StreamScreen(
 
                 // Mute TTS toggle
                 IconButton(
-                    onClick = { streamViewModel.toggleMute() },
+                    onClick = onToggleMute,
                     modifier = Modifier
                         .size(48.dp)
                         .background(
@@ -308,14 +345,33 @@ fun StreamScreen(
         if (streamUiState.isShareDialogVisible) {
             SharePhotoDialog(
                 photo = photo,
-                onDismiss = { streamViewModel.hideShareDialog() },
+                onDismiss = onHideShareDialog,
                 onShare = { bitmap ->
-                    streamViewModel.sharePhoto(bitmap)
-                    streamViewModel.hideShareDialog()
+                    onSharePhoto(bitmap)
+                    onHideShareDialog()
                 },
             )
         }
     }
+}
+
+@Preview(showBackground = true)
+@Composable
+private fun StreamScreenPreview() {
+    StreamScreenContent(
+        streamUiState = StreamUiState(),
+        wearablesUiState = WearablesUiState(),
+        onStartStream = {},
+        onStopStream = {},
+        onProcessorSelected = {},
+        onToggleServerStreaming = {},
+        onToggleAudioStreaming = {},
+        onToggleMute = {},
+        onCycleTimerMode = {},
+        onCapturePhoto = {},
+        onSharePhoto = {},
+        onHideShareDialog = {}
+    )
 }
 
 @Composable

@@ -67,6 +67,17 @@ class TextToSpeechManager(context: Context) {
 
             override fun onDone(utteranceId: String?) {
                 _isSpeaking.value = false
+                
+                // Check for pending text and speak it if available
+                pendingText?.let { text ->
+                    // Run on main thread helper if needed, but TTS is thread safe.
+                    // However, we want to update state safely.
+                    // Recursive call to speak() will handle the check and call speakInternal
+                    // BUT inside onDone we are in a binder thread.
+                    // Safer to call speakInternal directly as we know we are 'done'.
+                    // But to respect the flow, we just call speakInternal.
+                    speakInternal(text)
+                }
             }
 
             @Deprecated("Deprecated in Java")
@@ -82,11 +93,14 @@ class TextToSpeechManager(context: Context) {
         })
     }
 
+
+    // Buffer for the latest text that arrived while speaking
+    private var pendingText: String? = null
+
     /**
-     * Speak the given text immediately.
-     * Cancels any current speech - latest text wins.
-     *
-     * @param text The text to speak
+     * Speak the given text.
+     * If speaking: queues this text (overwriting any previous pending text).
+     * If not speaking: speaks immediately.
      */
     fun speak(text: String) {
         if (_isMuted.value || !isInitialized || text.isBlank()) {
@@ -98,13 +112,26 @@ class TextToSpeechManager(context: Context) {
             return
         }
 
+        // If currently speaking, queue this as the ONE pending item (conflation)
+        if (_isSpeaking.value) {
+            pendingText = text
+            Log.d(TAG, "Speaking busy, queued pending text: ${text.take(50)}...")
+            return
+        }
+
+        speakInternal(text)
+    }
+
+    private fun speakInternal(text: String) {
         lastSpokenText = text
         val utteranceId = "utterance_${utteranceCounter++}"
+        pendingText = null // Clear pending as we are processing it (or a newer one)
 
-        // QUEUE_FLUSH cancels current speech and speaks new text immediately
+        // QUEUE_FLUSH usage is now safe/intended because we only call this when NOT speaking,
+        // OR when we explicitly want to start the next pending item.
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
-
-        Log.d(TAG, "Speaking (latest wins): ${text.take(50)}...")
+        
+        Log.d(TAG, "Speaking: ${text.take(50)}...")
     }
 
     /**

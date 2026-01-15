@@ -41,6 +41,8 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.components.Serve
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.components.StatusBar
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 import kotlinx.coroutines.launch
+import androidx.compose.ui.tooling.preview.Preview
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesUiState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -50,6 +52,36 @@ fun NonStreamScreen(
     modifier: Modifier = Modifier,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+
+    NonStreamScreenContent(
+        uiState = uiState,
+        onDisconnect = { viewModel.startUnregistration() },
+        onSetServerUrl = { viewModel.setServerUrl(it) },
+        onConnectToServer = { viewModel.connectToServer() },
+        onDisconnectFromServer = { viewModel.disconnectFromServer() },
+        onFetchProcessors = { viewModel.fetchProcessors() },
+        onSelectProcessor = { viewModel.selectProcessor(it) },
+        onStartStreaming = { viewModel.navigateToStreaming(onRequestWearablesPermission) },
+        onHideGettingStartedSheet = { viewModel.hideGettingStartedSheet() },
+        modifier = modifier
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun NonStreamScreenContent(
+    uiState: WearablesUiState,
+    onDisconnect: () -> Unit,
+    onSetServerUrl: (String) -> Unit,
+    onConnectToServer: () -> Unit,
+    onDisconnectFromServer: () -> Unit,
+    onFetchProcessors: () -> Unit,
+    onSelectProcessor: (Int) -> Unit,
+    onStartStreaming: () -> Unit,
+    onHideGettingStartedSheet: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     val gettingStartedSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
     val scope = rememberCoroutineScope()
     var dropdownExpanded by remember { mutableStateOf(false) }
@@ -99,7 +131,7 @@ fun NonStreamScreen(
                                     )
                                 },
                                 onClick = {
-                                    viewModel.startUnregistration()
+                                    onDisconnect()
                                     dropdownExpanded = false
                                 },
                                 modifier = Modifier.height(40.dp)
@@ -157,17 +189,17 @@ fun NonStreamScreen(
                             serverUrl = uiState.serverUrl,
                             connectionState = uiState.connectionState,
                             isFetchingProcessors = uiState.isFetchingProcessors,
-                            onUrlChange = { viewModel.setServerUrl(it) },
-                            onConnect = { viewModel.connectToServer() },
-                            onDisconnect = { viewModel.disconnectFromServer() },
-                            onFetchProcessors = { viewModel.fetchProcessors() }
+                            onUrlChange = onSetServerUrl,
+                            onConnect = onConnectToServer,
+                            onDisconnect = onDisconnectFromServer,
+                            onFetchProcessors = onFetchProcessors
                         )
 
                         // Processor selector
                         ProcessorSelector(
                             processors = uiState.processors,
                             selectedProcessorId = uiState.selectedProcessorId,
-                            onProcessorSelected = { viewModel.selectProcessor(it) },
+                            onProcessorSelected = onSelectProcessor,
                             enabled = uiState.isConnectedToServer
                         )
                     }
@@ -250,7 +282,7 @@ fun NonStreamScreen(
             // Start Streaming Button
             SwitchButton(
                 label = stringResource(R.string.stream_button_title),
-                onClick = { viewModel.navigateToStreaming(onRequestWearablesPermission) },
+                onClick = onStartStreaming,
                 enabled = uiState.canStartStreaming,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -262,14 +294,14 @@ fun NonStreamScreen(
             // Getting Started Sheet
             if (uiState.isGettingStartedSheetVisible) {
                 ModalBottomSheet(
-                    onDismissRequest = { viewModel.hideGettingStartedSheet() },
+                    onDismissRequest = onHideGettingStartedSheet,
                     sheetState = gettingStartedSheetState
                 ) {
                     GettingStartedSheetContent(
                         onContinue = {
                             scope.launch {
                                 gettingStartedSheetState.hide()
-                                viewModel.hideGettingStartedSheet()
+                                onHideGettingStartedSheet()
                             }
                         }
                     )
@@ -277,6 +309,22 @@ fun NonStreamScreen(
             }
         }
     }
+}
+
+@Preview(showBackground = true)
+@Composable
+private fun NonStreamScreenPreview() {
+    NonStreamScreenContent(
+        uiState = WearablesUiState(),
+        onDisconnect = {},
+        onSetServerUrl = {},
+        onConnectToServer = {},
+        onDisconnectFromServer = {},
+        onFetchProcessors = {},
+        onSelectProcessor = {},
+        onStartStreaming = {},
+        onHideGettingStartedSheet = {}
+    )
 }
 
 @Composable

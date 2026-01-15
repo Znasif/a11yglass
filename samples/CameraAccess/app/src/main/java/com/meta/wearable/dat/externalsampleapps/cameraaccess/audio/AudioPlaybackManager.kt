@@ -123,6 +123,11 @@ class AudioPlaybackManager {
             return
         }
         
+        // CONFLATION: Clear any waiting clips.
+        // If we are currently playing, that clip is already in the 'writeAudioData' loop 
+        // and won't be affected. We only remove clips waiting in line.
+        chunkQueue.clear()
+        
         // Queue audio for playback
         chunkQueue.add(pcmData)
         

@@ -60,6 +60,13 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.sample
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.Dispatchers
+import androidx.annotation.OptIn
+import kotlinx.coroutines.FlowPreview
 
 class StreamViewModel(
     application: Application,
@@ -95,7 +102,12 @@ class StreamViewModel(
     private var frameStreamingJob: Job? = null
 
     // Frame streaming state
-    private var lastFrameBitmap: Bitmap? = null
+    // Use SharedFlow with replay=1 and DROP_OLDEST to ensure we always have the latest frame available
+    // and drop intermediate frames if processing/sending is slow.
+    private val _videoFrameFlow = MutableSharedFlow<Bitmap>(
+        replay = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
 
     init {
         // Collect timer state
@@ -171,7 +183,7 @@ class StreamViewModel(
             Wearables.startStreamSession(
                 getApplication(),
                 deviceSelector,
-                StreamConfiguration(videoQuality = VideoQuality.LOW, 2),
+                StreamConfiguration(videoQuality = VideoQuality.HIGH, 24),
             ).also { streamSession = it }
 
         videoJob = viewModelScope.launch {
@@ -206,7 +218,6 @@ class StreamViewModel(
         streamSession?.close()
         streamSession = null
         streamTimer.stopTimer()
-        lastFrameBitmap = null
 
         _uiState.update { INITIAL_STATE }
     }
@@ -216,6 +227,7 @@ class StreamViewModel(
     /**
      * Start streaming frames to the server.
      */
+    @OptIn(FlowPreview::class)
     fun startServerStreaming() {
         if (_uiState.value.isStreamingToServer) {
             Log.w(TAG, "Already streaming to server")
@@ -234,14 +246,26 @@ class StreamViewModel(
             )
         }
 
-        // Start the frame streaming loop
-        frameStreamingJob = viewModelScope.launch {
-            while (_uiState.value.isStreamingToServer) {
-                lastFrameBitmap?.let { bitmap ->
-                    sendFrameToServer(bitmap)
-                }
-                delay(FRAME_DELAY_MS)
-            }
+        // Start the frame streaming loop using Flow
+        frameStreamingJob = viewModelScope.launch(Dispatchers.Default) {
+             // Explicitly type as Flow<Bitmap> so we can reassign with sample() result
+             var flow: kotlinx.coroutines.flow.Flow<Bitmap> = _videoFrameFlow.asSharedFlow()
+
+             // Only apply sampling if a specific delay is requested.
+             // If delay is 0, we consume as fast as possible (sequentially).
+             if (FRAME_DELAY_MS > 0) {
+                 flow = flow.sample(FRAME_DELAY_MS)
+             }
+
+             flow.collect { bitmap ->
+                 // Check state again because collection continues until job cancelled
+                 if (_uiState.value.isStreamingToServer) {
+                     // This suspends until the frame is fully compressed and sent.
+                     // During suspension, _videoFrameFlow (DROP_OLDEST) discards intermediate frames.
+                     // On resume, we pick up the latest frame.
+                     sendFrameToServer(bitmap)
+                 }
+             }
         }
 
         Log.d(TAG, "Started server streaming")
@@ -282,25 +306,30 @@ class StreamViewModel(
     /**
      * Send a frame to the server for processing.
      */
-    private fun sendFrameToServer(bitmap: Bitmap) {
-        viewModelScope.launch {
-            try {
-                // Convert bitmap to JPEG base64
+    /**
+     * Send a frame to the server for processing.
+     * Suspends to perform compression on Default dispatcher.
+     */
+    private suspend fun sendFrameToServer(bitmap: Bitmap) {
+        try {
+            // Compress bitmap on background thread
+            // This is CPU intensive so we switch to Default dispatcher (if not already there)
+            val dataUrl = kotlinx.coroutines.withContext(Dispatchers.Default) {
                 val outputStream = ByteArrayOutputStream()
                 bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, outputStream)
                 val jpegBytes = outputStream.toByteArray()
 
                 // Create data URL (matching web client format)
                 val base64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
-                val dataUrl = "data:image/jpeg;base64,$base64"
-
-                // Send to server
-                val processorId = wearablesViewModel.uiState.value.selectedProcessorId
-                wearablesViewModel.serverRepository.sendFrame(dataUrl, processorId)
-
-            } catch (e: Exception) {
-                Log.e(TAG, "Error sending frame: ${e.message}")
+                "data:image/jpeg;base64,$base64"
             }
+
+            // Send to server (Main thread safe via Repository/WebSocketManager)
+            val processorId = wearablesViewModel.uiState.value.selectedProcessorId
+            wearablesViewModel.serverRepository.sendFrame(dataUrl, processorId)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending frame: ${e.message}")
         }
     }
 
@@ -537,8 +566,9 @@ class StreamViewModel(
 
         val bitmap = BitmapFactory.decodeByteArray(out, 0, out.size)
 
-        // Store for server streaming
-        lastFrameBitmap = bitmap
+        // Store for server streaming via Flow
+        // tryEmit will succeed because we configured BUFFER_OVERFLOW_DROP_OLDEST
+        _videoFrameFlow.tryEmit(bitmap)
 
         _uiState.update { it.copy(videoFrame = bitmap) }
     }
