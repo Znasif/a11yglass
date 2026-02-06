@@ -46,8 +46,11 @@ data class WearablesUiState(
     val isRegistered: Boolean = registrationState is RegistrationState.Registered || hasMockDevices
     
     val selectedProcessor: ProcessorInfo? = processors.find { it.id == selectedProcessorId }
-    
-    val canStartStreaming: Boolean = isRegistered && 
-            devices.isNotEmpty() && 
-            isConnectedToServer
+
+    /** True if the currently selected processor runs on-device. */
+    val isOnDeviceProcessorSelected: Boolean get() = selectedProcessorId < 0
+
+    val canStartStreaming: Boolean = isRegistered &&
+            devices.isNotEmpty() &&
+            (isConnectedToServer || isOnDeviceProcessorSelected)
 }

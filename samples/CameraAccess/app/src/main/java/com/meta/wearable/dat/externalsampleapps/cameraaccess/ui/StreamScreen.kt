@@ -162,7 +162,7 @@ fun StreamScreenContent(
                 processors = wearablesUiState.processors,
                 selectedProcessorId = wearablesUiState.selectedProcessorId,
                 onProcessorSelected = onProcessorSelected,
-                enabled = wearablesUiState.isConnectedToServer
+                enabled = wearablesUiState.processors.isNotEmpty()
             )
 
             // Response text display
@@ -268,7 +268,7 @@ fun StreamScreenContent(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = if (streamUiState.isStreamingToServer) "Stop Server" else "Start Server",
+                        text = if (streamUiState.isStreamingToServer) "Stop Processing" else "Start Processing",
                         maxLines = 1
                     )
                 }

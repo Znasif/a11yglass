@@ -17,18 +17,21 @@ import com.google.gson.annotations.SerializedName
 data class ProcessorInfo(
     @SerializedName("id")
     val id: Int,
-    
+
     @SerializedName("name")
     val name: String,
-    
+
     @SerializedName("dependencies")
     val dependencies: List<Int> = emptyList(),
-    
+
     @SerializedName("expects_input")
     val expectsInput: String = "image",
-    
+
     @SerializedName("description")
-    val description: String = ""
+    val description: String = "",
+
+    /** True if this processor runs on-device without a server connection. */
+    val isOnDevice: Boolean = false
 )
 
 /**

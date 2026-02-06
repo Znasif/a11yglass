@@ -47,6 +47,8 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.AudioPlayback
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.AudioStreamManager
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.TextToSpeechManager
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.network.models.ParsedResponse
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessorManager
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessorResult
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -100,6 +102,7 @@ class StreamViewModel(
     private var timerJob: Job? = null
     private var serverResponseJob: Job? = null
     private var frameStreamingJob: Job? = null
+    private var localProcessingJob: Job? = null
 
     // Frame streaming state
     // Use SharedFlow with replay=1 and DROP_OLDEST to ensure we always have the latest frame available
@@ -214,6 +217,8 @@ class StreamViewModel(
         stateJob = null
         frameStreamingJob?.cancel()
         frameStreamingJob = null
+        localProcessingJob?.cancel()
+        localProcessingJob = null
 
         streamSession?.close()
         streamSession = null
@@ -222,18 +227,94 @@ class StreamViewModel(
         _uiState.update { INITIAL_STATE }
     }
 
-    // ========== Server Streaming Methods ==========
+    // ========== Streaming Methods (Local & Server) ==========
 
     /**
-     * Start streaming frames to the server.
+     * Start streaming frames for processing.
+     * Routes to on-device or server processing based on selected processor.
      */
     @OptIn(FlowPreview::class)
     fun startServerStreaming() {
         if (_uiState.value.isStreamingToServer) {
-            Log.w(TAG, "Already streaming to server")
+            Log.w(TAG, "Already streaming")
             return
         }
 
+        val selectedProcessorId = wearablesViewModel.uiState.value.selectedProcessorId
+
+        if (OnDeviceProcessorManager.isOnDeviceProcessor(selectedProcessorId)) {
+            startLocalProcessing(selectedProcessorId)
+        } else {
+            startRemoteStreaming()
+        }
+    }
+
+    /**
+     * Start processing frames locally using an on-device processor.
+     */
+    @OptIn(FlowPreview::class)
+    private fun startLocalProcessing(processorId: Int) {
+        val processor = OnDeviceProcessorManager.getProcessor(processorId)
+        if (processor == null) {
+            _uiState.update { it.copy(errorMessage = "On-device processor not found") }
+            return
+        }
+
+        _uiState.update {
+            it.copy(
+                isStreamingToServer = true,
+                statusMessage = "Processing on-device: ${processor.name}"
+            )
+        }
+
+        localProcessingJob = viewModelScope.launch(Dispatchers.Default) {
+            var flow: kotlinx.coroutines.flow.Flow<Bitmap> = _videoFrameFlow.asSharedFlow()
+
+            if (FRAME_DELAY_MS > 0) {
+                flow = flow.sample(FRAME_DELAY_MS)
+            }
+
+            flow.collect { bitmap ->
+                if (_uiState.value.isStreamingToServer) {
+                    try {
+                        val result = processor.process(bitmap)
+                        handleLocalProcessorResult(result)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Local processing error: ${e.message}")
+                    }
+                }
+            }
+        }
+
+        Log.d(TAG, "Started local processing with: ${processor.name}")
+    }
+
+    /**
+     * Handle a result from an on-device processor.
+     * Reuses the same UI update pattern as handleServerResponse.
+     */
+    private fun handleLocalProcessorResult(result: OnDeviceProcessorResult) {
+        result.processedImage?.let { bitmap ->
+            _uiState.update { it.copy(processedFrame = bitmap) }
+        }
+
+        result.text?.let { text ->
+            if (text.isNotBlank()) {
+                _uiState.update { it.copy(responseText = text) }
+                wearablesViewModel.updateServerResponseText(text)
+
+                if (!_uiState.value.isAudioMuted) {
+                    ttsManager.speak(text)
+                }
+            }
+        }
+    }
+
+    /**
+     * Start streaming frames to the remote server.
+     */
+    @OptIn(FlowPreview::class)
+    private fun startRemoteStreaming() {
         if (!wearablesViewModel.serverRepository.isConnected()) {
             _uiState.update { it.copy(errorMessage = "Not connected to server") }
             return
@@ -246,29 +327,21 @@ class StreamViewModel(
             )
         }
 
-        // Start the frame streaming loop using Flow
         frameStreamingJob = viewModelScope.launch(Dispatchers.Default) {
-             // Explicitly type as Flow<Bitmap> so we can reassign with sample() result
              var flow: kotlinx.coroutines.flow.Flow<Bitmap> = _videoFrameFlow.asSharedFlow()
 
-             // Only apply sampling if a specific delay is requested.
-             // If delay is 0, we consume as fast as possible (sequentially).
              if (FRAME_DELAY_MS > 0) {
                  flow = flow.sample(FRAME_DELAY_MS)
              }
 
              flow.collect { bitmap ->
-                 // Check state again because collection continues until job cancelled
                  if (_uiState.value.isStreamingToServer) {
-                     // This suspends until the frame is fully compressed and sent.
-                     // During suspension, _videoFrameFlow (DROP_OLDEST) discards intermediate frames.
-                     // On resume, we pick up the latest frame.
                      sendFrameToServer(bitmap)
                  }
              }
         }
 
-        Log.d(TAG, "Started server streaming")
+        Log.d(TAG, "Started remote server streaming")
     }
 
     /**
@@ -277,6 +350,8 @@ class StreamViewModel(
     fun stopServerStreaming() {
         frameStreamingJob?.cancel()
         frameStreamingJob = null
+        localProcessingJob?.cancel()
+        localProcessingJob = null
 
         // Stop any pending TTS (matches web client behavior)
         ttsManager.stop()
@@ -289,7 +364,7 @@ class StreamViewModel(
             )
         }
 
-        Log.d(TAG, "Stopped server streaming")
+        Log.d(TAG, "Stopped streaming")
     }
 
     /**

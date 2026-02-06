@@ -196,11 +196,12 @@ fun NonStreamScreenContent(
                         )
 
                         // Processor selector
+                        // Enable selector when any processors are available (on-device or server)
                         ProcessorSelector(
                             processors = uiState.processors,
                             selectedProcessorId = uiState.selectedProcessorId,
                             onProcessorSelected = onSelectProcessor,
-                            enabled = uiState.isConnectedToServer
+                            enabled = uiState.processors.isNotEmpty()
                         )
                     }
                 }

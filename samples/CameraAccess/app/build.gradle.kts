@@ -44,6 +44,11 @@ android {
   buildFeatures { compose = true }
   composeOptions { kotlinCompilerExtensionVersion = "1.5.1" }
   packaging { resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" } }
+  aaptOptions {
+    noCompress += "tflite"
+    noCompress += "task"
+    noCompress += "litertlm"
+  }
   signingConfigs {
     getByName("debug") {
       storeFile = file("sample.keystore")
@@ -76,6 +81,13 @@ dependencies {
   implementation(libs.retrofit.gson)
   implementation(libs.gson)
   implementation(libs.kotlinx.coroutines.android)
+
+  // On-device ML dependencies
+  implementation(libs.litert)
+  implementation(libs.litert.gpu)
+  implementation(libs.litert.support)
+  implementation(libs.mediapipe.tasks.vision)
+  implementation(libs.litertlm.android)
 
   // Testing
   androidTestImplementation(libs.androidx.ui.test.junit4)
