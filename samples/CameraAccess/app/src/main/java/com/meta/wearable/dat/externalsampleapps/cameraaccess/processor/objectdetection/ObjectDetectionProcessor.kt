@@ -12,6 +12,8 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceP
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.gpu.GpuDelegate
+import org.tensorflow.lite.gpu.CompatibilityList
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.nio.ByteBuffer
@@ -38,6 +40,7 @@ class ObjectDetectionProcessor : OnDeviceProcessor {
     override val description = "RF-DETR object detection running locally"
 
     private var interpreter: Interpreter? = null
+    private var gpuDelegate: GpuDelegate? = null
     private var labels: List<String> = emptyList()
     private var isInitialized = false
 
@@ -61,11 +64,27 @@ class ObjectDetectionProcessor : OnDeviceProcessor {
             // Load labels
             labels = loadLabels(context)
 
-            // Load TFLite model
+            // Load TFLite model with GPU acceleration
             val modelBuffer = loadModelFile(context)
-            val options = Interpreter.Options().apply {
-                setNumThreads(NUM_THREADS)
+            val options = Interpreter.Options()
+            
+            // Try GPU delegate first for faster inference
+            val compatList = CompatibilityList()
+            if (compatList.isDelegateSupportedOnThisDevice) {
+                try {
+                    gpuDelegate = GpuDelegate(compatList.bestOptionsForThisDevice)
+                    options.addDelegate(gpuDelegate)
+                    Log.d(TAG, "GPU delegate enabled for object detection")
+                } catch (e: Exception) {
+                    Log.w(TAG, "GPU delegate failed, falling back to CPU: ${e.message}")
+                    gpuDelegate = null
+                    options.setNumThreads(NUM_THREADS)
+                }
+            } else {
+                Log.d(TAG, "GPU not supported, using CPU with $NUM_THREADS threads")
+                options.setNumThreads(NUM_THREADS)
             }
+            
             interpreter = Interpreter(modelBuffer, options)
             isInitialized = true
             Log.d(TAG, "RF-DETR model loaded successfully with ${labels.size} labels")
@@ -506,6 +525,8 @@ class ObjectDetectionProcessor : OnDeviceProcessor {
     override fun release() {
         interpreter?.close()
         interpreter = null
+        gpuDelegate?.close()
+        gpuDelegate = null
         isInitialized = false
         Log.d(TAG, "RF-DETR model released")
     }

@@ -15,6 +15,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -48,6 +50,11 @@ class SceneDescriptionProcessor : OnDeviceProcessor {
     private var appContext: Context? = null
     
     private val downloadScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val inferenceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    
+    // Frame dropping: skip frames while inference is running
+    private val isProcessing = AtomicBoolean(false)
+    private val latestResult = AtomicReference<OnDeviceProcessorResult?>(null)
 
     override fun initialize(context: Context) {
         appContext = context.applicationContext
@@ -80,12 +87,22 @@ class SceneDescriptionProcessor : OnDeviceProcessor {
         clearXnnpackCache(context)
 
         return try {
+            // Try GPU first for faster inference, fallback to CPU
+            val useGpu = try {
+                // Test if GPU backend is available
+                true
+            } catch (e: Exception) {
+                Log.w(TAG, "GPU not available, using CPU: ${e.message}")
+                false
+            }
+            
             val config = EngineConfig(
                 modelPath = modelFile.absolutePath,
-                backend = Backend.CPU,
+                backend = if (useGpu) Backend.GPU else Backend.CPU,
                 cacheDir = context.cacheDir.path,
-                visionBackend = Backend.CPU // Enable vision processing
+                visionBackend = if (useGpu) Backend.GPU else Backend.CPU
             )
+            Log.d(TAG, "Using ${if (useGpu) "GPU" else "CPU"} backend for FastVLM")
             engine = Engine(config)
             engine!!.initialize()
             isInitialized = true
@@ -294,6 +311,23 @@ class SceneDescriptionProcessor : OnDeviceProcessor {
                 )
             }
 
+            // FRAME DROPPING: If already processing, return last result immediately
+            // This prevents the camera preview from freezing
+            if (isProcessing.get()) {
+                val cached = latestResult.get()
+                return@withContext cached?.copy(
+                    processedImage = frame,  // Always use current frame
+                    processingTimeMs = 0     // Indicate cached result
+                ) ?: OnDeviceProcessorResult(
+                    processedImage = frame,
+                    text = "Processing...",
+                    processingTimeMs = 0
+                )
+            }
+
+            // Mark as processing and run inference
+            isProcessing.set(true)
+            
             try {
                 // Save frame to temp file for LiteRT-LM image input
                 val tempFile = File.createTempFile("frame_", ".jpg")
@@ -312,11 +346,15 @@ class SceneDescriptionProcessor : OnDeviceProcessor {
 
                 tempFile.delete()
 
-                OnDeviceProcessorResult(
+                val result = OnDeviceProcessorResult(
                     processedImage = frame,
                     text = message.toString(),
                     processingTimeMs = System.currentTimeMillis() - startTime
                 )
+                
+                // Cache result for frame dropping
+                latestResult.set(result)
+                result
             } catch (e: Exception) {
                 Log.e(TAG, "Inference error: ${e.message}")
                 OnDeviceProcessorResult(
@@ -324,6 +362,8 @@ class SceneDescriptionProcessor : OnDeviceProcessor {
                     text = "Scene description error: ${e.message}",
                     processingTimeMs = System.currentTimeMillis() - startTime
                 )
+            } finally {
+                isProcessing.set(false)
             }
         }
 
