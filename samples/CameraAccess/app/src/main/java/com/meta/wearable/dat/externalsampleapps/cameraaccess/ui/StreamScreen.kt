@@ -35,6 +35,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.meta.wearable.dat.camera.types.StreamSessionState
@@ -142,10 +143,11 @@ fun StreamScreenContent(
                     activeColor = AppColor.Green
                 )
 
-                // Audio streaming status
+                // Audio streaming status (includes voice commands)
+                val isMicActive = streamUiState.isAudioStreaming || streamUiState.isVoiceListening
                 StatusChip(
-                    label = if (streamUiState.isAudioStreaming) "Mic On" else "Mic Off",
-                    isActive = streamUiState.isAudioStreaming,
+                    label = if (isMicActive) "Mic On" else "Mic Off",
+                    isActive = isMicActive,
                     activeColor = AppColor.Green
                 )
 
@@ -335,6 +337,21 @@ fun StreamScreenContent(
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()
                     .padding(bottom = 180.dp),
+                textAlign = TextAlign.Center,
+            )
+        }
+
+        // Voice transcript display (tiny text at very bottom)
+        if (streamUiState.isVoiceListening || streamUiState.voiceTranscript.isNotEmpty()) {
+            Text(
+                text = streamUiState.voiceTranscript.ifEmpty { "🎤 listening..." },
+                color = Color.Gray,
+                fontSize = 8.sp,
+                maxLines = 1,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 4.dp),
                 textAlign = TextAlign.Center,
             )
         }

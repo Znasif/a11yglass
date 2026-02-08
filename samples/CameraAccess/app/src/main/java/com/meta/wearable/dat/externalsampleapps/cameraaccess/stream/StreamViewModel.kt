@@ -46,6 +46,7 @@ import com.meta.wearable.dat.core.selectors.DeviceSelector
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.AudioPlaybackManager
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.AudioStreamManager
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.TextToSpeechManager
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.VoiceCommandManager
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.network.models.ParsedResponse
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessorManager
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessorResult
@@ -95,6 +96,7 @@ class StreamViewModel(
     private val audioStreamManager = AudioStreamManager(application)
     private val audioPlaybackManager = AudioPlaybackManager()
     private val ttsManager = TextToSpeechManager(application)
+    private val voiceCommandManager = VoiceCommandManager(application)
 
     // Jobs for various coroutines
     private var videoJob: Job? = null
@@ -205,11 +207,15 @@ class StreamViewModel(
                 }
             }
         }
+
+        // Start voice command recognition
+        startVoiceCommands()
     }
 
     fun stopStream() {
         stopServerStreaming()
         stopAudioStreaming()
+        stopVoiceCommands()
 
         videoJob?.cancel()
         videoJob = null
@@ -757,6 +763,65 @@ class StreamViewModel(
         }
     }
 
+    // ========== Voice Command Methods ==========
+
+    private var voiceTranscriptJob: Job? = null
+    private var voiceActiveJob: Job? = null
+
+    private fun startVoiceCommands() {
+        voiceCommandManager.start { command ->
+            handleVoiceCommand(command)
+        }
+
+        // Collect transcript updates
+        voiceTranscriptJob = viewModelScope.launch {
+            voiceCommandManager.transcript.collect { transcript ->
+                _uiState.update { it.copy(voiceTranscript = transcript) }
+            }
+        }
+
+        // Collect active state
+        voiceActiveJob = viewModelScope.launch {
+            voiceCommandManager.isActive.collect { isActive ->
+                _uiState.update { it.copy(isVoiceListening = isActive) }
+            }
+        }
+
+        Log.d(TAG, "Voice commands started")
+    }
+
+    private fun stopVoiceCommands() {
+        voiceTranscriptJob?.cancel()
+        voiceTranscriptJob = null
+        voiceActiveJob?.cancel()
+        voiceActiveJob = null
+        voiceCommandManager.stop()
+        _uiState.update { it.copy(voiceTranscript = "", isVoiceListening = false) }
+        Log.d(TAG, "Voice commands stopped")
+    }
+
+    private fun handleVoiceCommand(command: VoiceCommandManager.VoiceCommand) {
+        when (command) {
+            is VoiceCommandManager.VoiceCommand.StartProcessor -> {
+                Log.d(TAG, "Voice command: start processor ${command.processorName}")
+                // Select the processor
+                wearablesViewModel.selectProcessor(command.processorId)
+                
+                // Restart processing to use the new processor
+                if (_uiState.value.isStreamingToServer) {
+                    stopServerStreaming()
+                }
+                startServerStreaming()
+            }
+            is VoiceCommandManager.VoiceCommand.StopProcessing -> {
+                Log.d(TAG, "Voice command: stop processing")
+                if (_uiState.value.isStreamingToServer) {
+                    stopServerStreaming()
+                }
+            }
+        }
+    }
+
     fun clearError() {
         _uiState.update { it.copy(errorMessage = null) }
     }
@@ -771,6 +836,7 @@ class StreamViewModel(
         audioStreamManager.cleanup()
         audioPlaybackManager.cleanup()
         ttsManager.cleanup()
+        voiceCommandManager.cleanup()
     }
 
     class Factory(

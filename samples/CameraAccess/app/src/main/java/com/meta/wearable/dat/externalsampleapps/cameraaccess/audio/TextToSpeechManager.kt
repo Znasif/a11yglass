@@ -9,6 +9,8 @@
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.audio
 
 import android.content.Context
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
@@ -20,8 +22,9 @@ import java.util.*
 /**
  * Manages Text-to-Speech for speaking server text responses.
  * Uses "latest wins" pattern - new text cancels current speech immediately.
+ * Routes audio output to Bluetooth SCO (Meta glasses) when available.
  */
-class TextToSpeechManager(context: Context) {
+class TextToSpeechManager(private val context: Context) {
 
     companion object {
         private const val TAG = "TextToSpeechManager"
@@ -50,12 +53,48 @@ class TextToSpeechManager(context: Context) {
                 } else {
                     isInitialized = true
                     tts?.setSpeechRate(SPEECH_RATE)
+                    
+                    // Route audio to Bluetooth for glasses
+                    routeAudioToBluetooth()
+                    
                     Log.d(TAG, "TTS initialized successfully")
                     setupUtteranceListener()
                 }
             } else {
                 Log.e(TAG, "TTS initialization failed: $status")
             }
+        }
+    }
+
+    /**
+     * Route audio output to Bluetooth SCO device (Meta glasses).
+     */
+    private fun routeAudioToBluetooth() {
+        try {
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            
+            // Set audio mode for voice communication (uses SCO)
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            
+            // Find and set Bluetooth SCO device
+            val devices = audioManager.availableCommunicationDevices
+            val btDevice = devices.find { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+            if (btDevice != null) {
+                audioManager.setCommunicationDevice(btDevice)
+                Log.d(TAG, "TTS audio routed to Bluetooth SCO: ${btDevice.productName}")
+            } else {
+                Log.d(TAG, "No Bluetooth SCO device found, using default speaker")
+            }
+            
+            // Set TTS audio attributes to use voice communication stream
+            val audioAttributes = android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+            tts?.setAudioAttributes(audioAttributes)
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error routing audio to Bluetooth: ${e.message}")
         }
     }
 

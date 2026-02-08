@@ -38,8 +38,8 @@ class SceneDescriptionProcessor : OnDeviceProcessor {
     }
 
     override val id = -105
-    override val name = "Scene Description (On-Device)"
-    override val description = "Describe scenes using FastVLM-0.5B running locally"
+    override val name = "Caption (On-Device)"
+    override val description = "Caption images using FastVLM-0.5B running locally"
 
     private var engine: Engine? = null
     private var modelPath: String? = null
