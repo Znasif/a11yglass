@@ -56,6 +56,8 @@ class VizLensProcessor : OnDeviceProcessor {
     
     private var handLandmarker: HandLandmarker? = null
     private var textRecognizer: TextRecognizer? = null
+    private var featureTracker: FeatureTracker? = null
+    private var initContext: Context? = null
     
     // State diagram: detected text labels from OCR
     private var stateDigram: List<TextLabel> = emptyList()
@@ -65,6 +67,10 @@ class VizLensProcessor : OnDeviceProcessor {
     private var lastSpokenLabel: String? = null
     private var lastSpokenTime: Long = 0
     private val speakCooldownMs = 1500L  // Don't repeat same label for 1.5s
+    
+    // Store original OCR bboxes for homography transformation
+    private var originalStateDiagram: List<TextLabel> = emptyList()
+    private var currentHomography: FloatArray? = null
     
     // Paint for visualization
     private val boxPaint = Paint().apply {
@@ -124,6 +130,11 @@ class VizLensProcessor : OnDeviceProcessor {
             textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
             Log.d(TAG, "ML Kit TextRecognizer initialized")
             
+            // Initialize FeatureTracker for homography estimation
+            featureTracker = FeatureTracker(context)
+            initContext = context
+            Log.d(TAG, "FeatureTracker initialized")
+            
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize: ${e.message}", e)
         }
@@ -149,7 +160,11 @@ class VizLensProcessor : OnDeviceProcessor {
                     val inputImage = InputImage.fromBitmap(frame, 0)
                     val visionText = recognizer.process(inputImage).await()
                     stateDigram = extractTextLabels(visionText)
+                    originalStateDiagram = stateDigram.map { it.copy() }
                     referenceFrameRegistered = true
+                    
+                    // Set reference frame for homography tracking (with crop optimization)
+                    featureTracker?.setReferenceFrame(frame, stateDigram)
                     
                     // Log all detected text labels for debugging
                     if (stateDigram.isNotEmpty()) {
@@ -160,6 +175,27 @@ class VizLensProcessor : OnDeviceProcessor {
                         Log.i(TAG, "=========================")
                     } else {
                         Log.w(TAG, "No text detected in frame")
+                    }
+                } else {
+                    // Compute homography to track bboxes as camera moves
+                    val tracker = featureTracker
+                    if (tracker != null) {
+                        currentHomography = tracker.computeHomography(frame)
+                        
+                        if (currentHomography != null) {
+                            // Transform bounding boxes using homography
+                            stateDigram = originalStateDiagram.map { label ->
+                                TextLabel(
+                                    text = label.text,
+                                    boundingBox = tracker.transformBoundingBox(label.boundingBox, currentHomography!!)
+                                )
+                            }
+                            Log.d(TAG, "Homography applied to ${stateDigram.size} bboxes")
+                        } else if (tracker.shouldRescan()) {
+                            // Too many tracking failures, trigger rescan
+                            Log.w(TAG, "Tracking lost, triggering rescan")
+                            resetScene()
+                        }
                     }
                 }
                 
@@ -406,8 +442,10 @@ class VizLensProcessor : OnDeviceProcessor {
      */
     fun resetScene() {
         stateDigram = emptyList()
+        originalStateDiagram = emptyList()
         referenceFrameRegistered = false
         lastSpokenLabel = null
+        currentHomography = null
         Log.d(TAG, "Scene reset - will re-register on next frame")
     }
     
@@ -416,8 +454,12 @@ class VizLensProcessor : OnDeviceProcessor {
         handLandmarker = null
         textRecognizer?.close()
         textRecognizer = null
+        featureTracker?.release()
+        featureTracker = null
         stateDigram = emptyList()
+        originalStateDiagram = emptyList()
         referenceFrameRegistered = false
+        currentHomography = null
         Log.d(TAG, "VizLensProcessor released")
     }
 }

@@ -93,6 +93,9 @@ dependencies {
   implementation("com.google.mlkit:text-recognition:16.0.0")
   implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
 
+  // VizLens: ONNX Runtime for SuperPoint+LightGlue feature matching
+  implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.0")
+
   // Testing
   androidTestImplementation(libs.androidx.ui.test.junit4)
   androidTestImplementation(libs.androidx.test.uiautomator)
