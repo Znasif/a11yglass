@@ -89,8 +89,12 @@ dependencies {
   implementation(libs.litert.support)
   implementation(libs.mediapipe.tasks.vision)
   implementation(libs.litertlm.android)
+  
+  // ML Kit Text Recognition
+  implementation("com.google.android.gms:play-services-mlkit-text-recognition:19.0.0")
+  implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
 
-  // VizLens: ONNX Runtime for EasyOCR (CRAFT + VGG-LSTM) and SuperPoint+LightGlue
+  // VizLens: ONNX Runtime for Homography Tracking (SuperPoint+LightGlue)
   implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.0")
 
   // Testing

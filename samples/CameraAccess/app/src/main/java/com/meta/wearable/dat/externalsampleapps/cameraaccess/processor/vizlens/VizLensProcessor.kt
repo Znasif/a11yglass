@@ -8,6 +8,12 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.util.Log
+import com.google.android.gms.tasks.Tasks
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.Text
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.TextRecognizer
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
@@ -49,7 +55,7 @@ class VizLensProcessor : OnDeviceProcessor {
     override val description = "Point at text to hear it read aloud"
     
     private var handLandmarker: HandLandmarker? = null
-    private var easyOCREngine: EasyOCREngine? = null
+    private var textRecognizer: TextRecognizer? = null
     private var featureTracker: FeatureTracker? = null
     private var initContext: Context? = null
     
@@ -121,9 +127,9 @@ class VizLensProcessor : OnDeviceProcessor {
             handLandmarker = HandLandmarker.createFromOptions(context, options)
             Log.d(TAG, "HandLandmarker initialized")
             
-            // Initialize EasyOCR engine (CRAFT detector + VGG-LSTM recogniser via ONNX)
-            easyOCREngine = EasyOCREngine(context)
-            Log.d(TAG, "EasyOCR engine initialized")
+            // Initialize ML Kit Text Recognizer
+            textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+            Log.d(TAG, "ML Kit TextRecognizer initialized")
             
             // Initialize FeatureTracker for homography estimation
             featureTracker = FeatureTracker(context)
@@ -140,9 +146,9 @@ class VizLensProcessor : OnDeviceProcessor {
             val startTime = System.currentTimeMillis()
             
             val landmarker = handLandmarker
-            val ocr = easyOCREngine
+            val recognizer = textRecognizer
             
-            if (landmarker == null || ocr == null) {
+            if (landmarker == null || recognizer == null) {
                 return@withContext OnDeviceProcessorResult(
                     processedImage = frame,
                     text = "VizLens not initialized",
@@ -155,7 +161,9 @@ class VizLensProcessor : OnDeviceProcessor {
                 if (scanRequested) {
                     scanRequested = false
                     
-                    stateDigram = ocr.detectAndRecognize(frame)
+                    val inputImage = InputImage.fromBitmap(frame, 0)
+                    val visionText = Tasks.await(recognizer.process(inputImage))
+                    stateDigram = extractTextLabels(visionText)
                     originalStateDiagram = stateDigram.map { it.copy() }
                     referenceFrameRegistered = true
                     currentHomography = null
@@ -437,14 +445,13 @@ class VizLensProcessor : OnDeviceProcessor {
     override fun release() {
         handLandmarker?.close()
         handLandmarker = null
-        easyOCREngine?.release()
-        easyOCREngine = null
+        textRecognizer?.close()
+        textRecognizer = null
         featureTracker?.release()
         featureTracker = null
         stateDigram = emptyList()
         originalStateDiagram = emptyList()
         referenceFrameRegistered = false
-        scanRequested = false
         currentHomography = null
         Log.d(TAG, "VizLensProcessor released")
     }
@@ -457,6 +464,22 @@ data class TextLabel(
     val text: String,
     val boundingBox: Rect
 )
+
+/**
+ * Helper to extract text labels from ML Kit result
+ */
+private fun extractTextLabels(visionText: Text): List<TextLabel> {
+    val labels = mutableListOf<TextLabel>()
+    for (block in visionText.textBlocks) {
+        for (line in block.lines) {
+            val box = line.boundingBox
+            if (box != null && line.text.isNotBlank()) {
+                labels.add(TextLabel(line.text, box))
+            }
+        }
+    }
+    return labels
+}
 
 /**
  * Simple 2D point for fingertip position.
