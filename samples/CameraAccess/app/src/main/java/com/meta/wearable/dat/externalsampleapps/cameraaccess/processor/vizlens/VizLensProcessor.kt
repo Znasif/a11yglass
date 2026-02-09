@@ -29,12 +29,13 @@ import kotlin.math.sqrt
  * VizLens Processor: Point at text to have it read aloud.
  * 
  * Pipeline:
- * 1. Scene Registration: Run OCR once to detect all text labels + bounding boxes
- * 2. Homography Tracking: Track reference image features to transform bboxes (TODO: SuperPoint+LightGlue)
+ * 1. Scene Registration: Run OCR on explicit trigger (voice "scan"/"photo"/"rescan", 
+ *    photo button, or processor start) to detect all text labels + bounding boxes.
+ *    OCR does NOT run continuously — only on these triggers.
+ * 2. Homography Tracking: On every subsequent frame, run SuperPoint+LightGlue via ONNX
+ *    to compute homography and transform stored bboxes to follow camera movement.
+ *    If homography fails (camera moved too far), bboxes freeze and user must say "rescan".
  * 3. Finger Intersection: Track fingertip and check bbox intersection → TTS
- * 
- * For initial implementation, we skip homography and assume camera is relatively stable.
- * This can be enhanced with SuperPoint+LightGlue for robust tracking.
  */
 class VizLensProcessor : OnDeviceProcessor {
     companion object {
@@ -62,6 +63,7 @@ class VizLensProcessor : OnDeviceProcessor {
     // State diagram: detected text labels from OCR
     private var stateDigram: List<TextLabel> = emptyList()
     private var referenceFrameRegistered = false
+    private var scanRequested = true  // true on startup so first frame triggers OCR
     
     // Track last spoken label to avoid repetition
     private var lastSpokenLabel: String? = null
@@ -156,12 +158,16 @@ class VizLensProcessor : OnDeviceProcessor {
             }
             
             try {
-                if (!referenceFrameRegistered || stateDigram.isEmpty()) {
+                // Phase 1: OCR — only on explicit trigger (scan requested)
+                if (scanRequested) {
+                    scanRequested = false
+                    
                     val inputImage = InputImage.fromBitmap(frame, 0)
                     val visionText = recognizer.process(inputImage).await()
                     stateDigram = extractTextLabels(visionText)
                     originalStateDiagram = stateDigram.map { it.copy() }
                     referenceFrameRegistered = true
+                    currentHomography = null
                     
                     // Set reference frame for homography tracking (with crop optimization)
                     featureTracker?.setReferenceFrame(frame, stateDigram)
@@ -176,25 +182,27 @@ class VizLensProcessor : OnDeviceProcessor {
                     } else {
                         Log.w(TAG, "No text detected in frame")
                     }
-                } else {
-                    // Compute homography to track bboxes as camera moves
+                } else if (referenceFrameRegistered && originalStateDiagram.isNotEmpty()) {
+                    // Phase 1b: Homography tracking — runs every frame after OCR
+                    // Transforms stored bboxes to follow camera movement
                     val tracker = featureTracker
                     if (tracker != null) {
-                        currentHomography = tracker.computeHomography(frame)
+                        val homography = tracker.computeHomography(frame)
                         
-                        if (currentHomography != null) {
+                        if (homography != null) {
+                            currentHomography = homography
                             // Transform bounding boxes using homography
                             stateDigram = originalStateDiagram.map { label ->
                                 TextLabel(
                                     text = label.text,
-                                    boundingBox = tracker.transformBoundingBox(label.boundingBox, currentHomography!!)
+                                    boundingBox = tracker.transformBoundingBox(label.boundingBox, homography)
                                 )
                             }
                             Log.d(TAG, "Homography applied to ${stateDigram.size} bboxes")
-                        } else if (tracker.shouldRescan()) {
-                            // Too many tracking failures, trigger rescan
-                            Log.w(TAG, "Tracking lost, triggering rescan")
-                            resetScene()
+                        } else {
+                            // Homography failed — bboxes freeze at last known position.
+                            // User must say "scan"/"rescan" to re-register.
+                            Log.d(TAG, "Homography failed (consecutive: ${tracker.shouldRescan()}), bboxes frozen")
                         }
                     }
                 }
@@ -426,8 +434,13 @@ class VizLensProcessor : OnDeviceProcessor {
         }
         
         // Draw status
+        val trackingLost = referenceFrameRegistered && 
+            originalStateDiagram.isNotEmpty() && 
+            featureTracker?.shouldRescan() == true
         val statusText = when {
-            stateDigram.isEmpty() -> "No text detected"
+            !referenceFrameRegistered -> "Say \"scan\" to detect text"
+            stateDigram.isEmpty() -> "No text found — say \"rescan\""
+            trackingLost -> "Tracking lost — say \"rescan\""
             fingertip == null -> "Show pointing finger"
             highlightedLabel != null -> "→ ${highlightedLabel.text}"
             else -> "Point at text"
@@ -438,15 +451,17 @@ class VizLensProcessor : OnDeviceProcessor {
     }
     
     /**
-     * Force re-registration of scene (call when scene changes).
+     * Request OCR re-scan on next frame.
+     * Called by voice commands ("scan"/"rescan"/"photo"), photo button, etc.
      */
     fun resetScene() {
         stateDigram = emptyList()
         originalStateDiagram = emptyList()
         referenceFrameRegistered = false
+        scanRequested = true
         lastSpokenLabel = null
         currentHomography = null
-        Log.d(TAG, "Scene reset - will re-register on next frame")
+        Log.d(TAG, "Scene reset - OCR will run on next frame")
     }
     
     override fun release() {
@@ -459,6 +474,7 @@ class VizLensProcessor : OnDeviceProcessor {
         stateDigram = emptyList()
         originalStateDiagram = emptyList()
         referenceFrameRegistered = false
+        scanRequested = false
         currentHomography = null
         Log.d(TAG, "VizLensProcessor released")
     }

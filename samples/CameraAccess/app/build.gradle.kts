@@ -48,6 +48,7 @@ android {
     noCompress += "tflite"
     noCompress += "task"
     noCompress += "litertlm"
+    noCompress += "onnx"
   }
   signingConfigs {
     getByName("debug") {

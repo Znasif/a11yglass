@@ -93,12 +93,12 @@ class FeatureTracker(context: Context) {
             bitmap, 
             unionRect.left, 
             unionRect.top, 
-            unionRect.width, 
-            unionRect.height
+            unionRect.width(), 
+            unionRect.height()
         )
         
         consecutiveFailures = 0
-        Log.d(TAG, "Reference frame set (cropped): ${unionRect.width}x${unionRect.height} at $unionRect")
+        Log.d(TAG, "Reference frame set (cropped): ${unionRect.width()}x${unionRect.height()} at $unionRect")
     }
     
     /**
@@ -331,10 +331,10 @@ class FeatureTracker(context: Context) {
      */
     private fun parseMatchesAlternate(outputs: OrtSession.Result): FloatArray {
         // Try to parse from first available output
-        for (i in 0 until outputs.size()) {
-            val tensor = outputs.get(i)?.get() as? OnnxTensor
+        for ((name, value) in outputs) {
+            val tensor = value as? OnnxTensor
             if (tensor != null) {
-                Log.d(TAG, "Output $i shape: ${tensor.info.shape.contentToString()}")
+                Log.d(TAG, "Output '$name' shape: ${tensor.info.shape.contentToString()}")
             }
         }
         return floatArrayOf()
