@@ -47,13 +47,33 @@ class FeatureTracker(context: Context) {
     private var consecutiveFailures = 0
     private val maxConsecutiveFailures = 10
     
+    // Store current frame dimensions for coordinate scaling
+    private var currentFrameWidth = 0
+    private var currentFrameHeight = 0
+    
     init {
         try {
             ortEnvironment = OrtEnvironment.getEnvironment()
             
             val modelBytes = context.assets.open(MODEL_PATH).use { it.readBytes() }
             ortSession = ortEnvironment?.createSession(modelBytes)
-            
+
+            // Log model metadata for diagnostics
+            Log.i(TAG, "=== ONNX MODEL METADATA ===")
+            ortSession?.let { session ->
+                Log.i(TAG, "Input tensors:")
+                for (name in session.inputNames) {
+                    val info = session.inputInfo[name]
+                    Log.i(TAG, "  - '$name': ${info?.info}")
+                }
+                Log.i(TAG, "Output tensors:")
+                for (name in session.outputNames) {
+                    val info = session.outputInfo[name]
+                    Log.i(TAG, "  - '$name': ${info?.info}")
+                }
+            }
+            Log.i(TAG, "===========================")
+
             isInitialized = true
             Log.d(TAG, "FeatureTracker initialized successfully")
         } catch (e: Exception) {
@@ -107,67 +127,57 @@ class FeatureTracker(context: Context) {
      */
     fun computeHomography(currentFrame: Bitmap): FloatArray? {
         if (!isInitialized || referenceFrame == null) {
+            Log.w(TAG, "computeHomography: BLOCKED - isInitialized=$isInitialized, hasRefFrame=${referenceFrame != null}")
             return null
         }
-        
-        val session = ortSession ?: return null
-        val env = ortEnvironment ?: return null
-        
+
+        val session = ortSession ?: run { Log.w(TAG, "computeHomography: ortSession is null"); return null }
+        val env = ortEnvironment ?: run { Log.w(TAG, "computeHomography: ortEnvironment is null"); return null }
+
         try {
-            // Preprocess both images (using same crop region)
-            // Note: We crop current frame at same location as reference frame
-            // This assumes small motion; if motion is large, features won't match anyway
-            val cropRect = referenceCropRect ?: Rect(0, 0, currentFrame.width, currentFrame.height)
-            
-            // Create cropped current frame (if needed)
-            val currentCropped = if (cropRect.width() != currentFrame.width || cropRect.height() != currentFrame.height) {
-                Bitmap.createBitmap(currentFrame, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
-            } else {
-                currentFrame
-            }
-            
+            currentFrameWidth = currentFrame.width
+            currentFrameHeight = currentFrame.height
+            Log.d(TAG, "computeHomography: refFrame=${referenceFrame!!.width}x${referenceFrame!!.height}, curFrame=${currentFrame.width}x${currentFrame.height}")
+
             val refTensor = preprocessImage(referenceFrame!!, env)
-            val curTensor = preprocessImage(currentCropped, env)
-            
-            // Stack into batch [2, 1, H, W]
-            val batchInput = createBatchInput(refTensor, curTensor, env)
-            
-            // Run inference
-            val inputs = mapOf("images" to batchInput)
+            val curTensor = preprocessImage(currentFrame, env)
+            Log.d(TAG, "computeHomography: image0 shape=${refTensor.info.shape.contentToString()}, image1 shape=${curTensor.info.shape.contentToString()}, running inference...")
+
+            // Run inference with two separate image inputs
+            val inputs = mapOf("image0" to refTensor, "image1" to curTensor)
             val outputs = session.run(inputs)
-            
-            // Parse output: matched keypoint indices
+            Log.d(TAG, "computeHomography: inference complete - ${outputs.size()} outputs returned")
+
+            // Parse output: matched keypoint pairs
             val matches = parseMatches(outputs)
-            
-            // Clean up tensors and bitmaps
+            Log.d(TAG, "computeHomography: parsed ${matches.size / 4} match pairs (${matches.size} floats)")
+
+            // Clean up tensors
             refTensor.close()
             curTensor.close()
-            if (currentCropped != currentFrame) {
-                currentCropped.recycle()
-            }
-            batchInput.close()
             outputs.close()
-            
+
             if (matches.size < MIN_MATCHES_FOR_HOMOGRAPHY * 2) {
                 Log.d(TAG, "Not enough matches: ${matches.size / 2}")
                 consecutiveFailures++
                 return null
             }
-            
+
             // Compute homography using RANSAC
             val homography = computeHomographyRANSAC(matches)
-            
+
             if (homography != null) {
                 consecutiveFailures = 0
-                Log.d(TAG, "Homography computed successfully with ${matches.size / 2} matches")
+                Log.d(TAG, "Homography computed successfully with ${matches.size / 4} match pairs")
             } else {
                 consecutiveFailures++
+                Log.w(TAG, "computeHomography: RANSAC failed")
             }
-            
+
             return homography
-            
+
         } catch (e: Exception) {
-            Log.e(TAG, "Error computing homography: ${e.message}")
+            Log.e(TAG, "Error computing homography: ${e.message}", e)
             consecutiveFailures++
             return null
         }
@@ -255,88 +265,117 @@ class FeatureTracker(context: Context) {
     }
     
     /**
-     * Create batch input from two image tensors.
-     */
-    private fun createBatchInput(ref: OnnxTensor, cur: OnnxTensor, env: OrtEnvironment): OnnxTensor {
-        // Concatenate along batch dimension: [2, 1, H, W]
-        val refData = ref.floatBuffer
-        val curData = cur.floatBuffer
-        
-        val batchBuffer = FloatBuffer.allocate(2 * INPUT_SIZE * INPUT_SIZE)
-        batchBuffer.put(refData)
-        refData.rewind()
-        batchBuffer.put(curData)
-        curData.rewind()
-        batchBuffer.rewind()
-        
-        return OnnxTensor.createTensor(env, batchBuffer, longArrayOf(2, 1, INPUT_SIZE.toLong(), INPUT_SIZE.toLong()))
-    }
-    
-    /**
      * Parse matched keypoint pairs from ONNX output.
      * Returns flattened array: [x1, y1, x2, y2, ...] where (x1,y1) is reference point, (x2,y2) is current point.
      */
     private fun parseMatches(outputs: OrtSession.Result): FloatArray {
-        // The model outputs matched keypoint coordinates
-        // Expected outputs: kpts0, kpts1, matches, match_confidence
-        
+        // Actual model output format:
+        //   kpts0:    INT64 [1, N, 2]  — N keypoint (x,y) coords in image0 (model input space)
+        //   kpts1:    INT64 [1, M, 2]  — M keypoint (x,y) coords in image1 (model input space)
+        //   matches0: INT64 [1, N]     — for each kpt in image0, index of matching kpt in image1 (-1 = unmatched)
+        //   mscores0: FLOAT [1, N]     — confidence score for each match
+
         try {
+            // Log all available output names
+            val outputNames = outputs.map { it.key }
+            Log.d(TAG, "parseMatches: available outputs: $outputNames")
+
             val kpts0 = outputs.get("kpts0")?.get() as? OnnxTensor
             val kpts1 = outputs.get("kpts1")?.get() as? OnnxTensor
-            val matchIndices = outputs.get("matches")?.get() as? OnnxTensor
-            
-            if (kpts0 == null || kpts1 == null || matchIndices == null) {
-                // Try alternate output names
+            val matchIdx = outputs.get("matches0")?.get() as? OnnxTensor
+            val scores = outputs.get("mscores0")?.get() as? OnnxTensor
+
+            Log.d(TAG, "parseMatches: kpts0=${kpts0?.info?.shape?.contentToString() ?: "NULL"} (${kpts0?.info?.type}), kpts1=${kpts1?.info?.shape?.contentToString() ?: "NULL"} (${kpts1?.info?.type}), matches0=${matchIdx?.info?.shape?.contentToString() ?: "NULL"}, mscores0=${scores?.info?.shape?.contentToString() ?: "NULL"}")
+
+            if (kpts0 == null || kpts1 == null || matchIdx == null) {
+                Log.w(TAG, "parseMatches: expected tensors missing, falling back to alternate parsing")
                 return parseMatchesAlternate(outputs)
             }
-            
-            val kpts0Data = kpts0.floatBuffer
-            val kpts1Data = kpts1.floatBuffer
-            val matchData = matchIndices.longBuffer
-            
+
+            // Keypoints are INT64 pixel coordinates in model input space (0..INPUT_SIZE-1)
+            val kpts0Buf = kpts0.longBuffer    // [1, N, 2] flattened: [x0,y0, x1,y1, ...] for N keypoints
+            val kpts1Buf = kpts1.longBuffer    // [1, M, 2] flattened: [x0,y0, x1,y1, ...] for M keypoints
+            val matchBuf = matchIdx.longBuffer // [1, N] flattened: for each kpt i in image0, matchBuf[i] = matched kpt index in image1 (-1 = no match)
+            val scoreBuf = scores?.floatBuffer // [1, N] flattened: confidence for each kpt's match
+
+            // Number of keypoints in image0 (the dimension we iterate over)
+            val numKeypoints = matchIdx.info.shape[1].toInt()
+            val refWidth = referenceFrame!!.width.toFloat()
+            val refHeight = referenceFrame!!.height.toFloat()
+            val cropOffsetX = (referenceCropRect?.left ?: 0).toFloat()
+            val cropOffsetY = (referenceCropRect?.top ?: 0).toFloat()
+            val curWidth = currentFrameWidth.toFloat()
+            val curHeight = currentFrameHeight.toFloat()
+
+            Log.d(TAG, "parseMatches: $numKeypoints keypoints in image0, refSize=${refWidth}x${refHeight}, cropOffset=($cropOffsetX,$cropOffsetY), curSize=${curWidth}x${curHeight}")
+
             val matches = mutableListOf<Float>()
-            
-            while (matchData.hasRemaining()) {
-                val idx0 = matchData.get().toInt()
-                val idx1 = matchData.get().toInt()
-                
-                if (idx0 >= 0 && idx1 >= 0) {
-                    // Get keypoint coordinates relative to CROP
-                    val x0_crop = kpts0Data.get(idx0 * 2) * referenceFrame!!.width / INPUT_SIZE
-                    val y0_crop = kpts0Data.get(idx0 * 2 + 1) * referenceFrame!!.height / INPUT_SIZE
-                    val x1_crop = kpts1Data.get(idx1 * 2) * referenceFrame!!.width / INPUT_SIZE
-                    val y1_crop = kpts1Data.get(idx1 * 2 + 1) * referenceFrame!!.height / INPUT_SIZE
-                    
-                    // Adjust to GLOBAL coordinates by adding crop offset
-                    val offsetX = referenceCropRect?.left ?: 0
-                    val offsetY = referenceCropRect?.top ?: 0
-                    
-                    matches.add(x0_crop + offsetX)
-                    matches.add(y0_crop + offsetY)
-                    matches.add(x1_crop + offsetX)
-                    matches.add(y1_crop + offsetY)
-                }
+
+            for (i in 0 until numKeypoints) {
+                val matchedIdx = matchBuf.get().toInt()  // index into kpts1, or -1 if unmatched
+                val score = scoreBuf?.get() ?: 1.0f
+                if (matchedIdx < 0 || score < 0.2f) continue
+
+                // kpts0[i] coords: pixel coords in model input space → scale to reference crop, add crop offset
+                val x0_model = kpts0Buf.get(i * 2).toFloat()
+                val y0_model = kpts0Buf.get(i * 2 + 1).toFloat()
+                val x0_global = x0_model * refWidth / INPUT_SIZE + cropOffsetX
+                val y0_global = y0_model * refHeight / INPUT_SIZE + cropOffsetY
+
+                // kpts1[matchedIdx] coords: pixel coords in model input space → scale to full current frame
+                val x1_model = kpts1Buf.get(matchedIdx * 2).toFloat()
+                val y1_model = kpts1Buf.get(matchedIdx * 2 + 1).toFloat()
+                val x1_global = x1_model * curWidth / INPUT_SIZE
+                val y1_global = y1_model * curHeight / INPUT_SIZE
+
+                matches.add(x0_global)
+                matches.add(y0_global)
+                matches.add(x1_global)
+                matches.add(y1_global)
             }
-            
+
+            Log.d(TAG, "parseMatches: ${matches.size / 4} valid matches out of $numKeypoints keypoints")
             return matches.toFloatArray()
-            
+
         } catch (e: Exception) {
-            Log.e(TAG, "Error parsing matches: ${e.message}")
+            Log.e(TAG, "Error parsing matches: ${e.message}", e)
             return floatArrayOf()
         }
     }
-    
+
     /**
      * Alternate parsing for different model output formats.
+     * Dumps comprehensive output information for diagnostics.
      */
     private fun parseMatchesAlternate(outputs: OrtSession.Result): FloatArray {
-        // Try to parse from first available output
+        Log.w(TAG, "parseMatchesAlternate: PRIMARY PARSING FAILED - dumping all outputs")
         for ((name, value) in outputs) {
             val tensor = value as? OnnxTensor
             if (tensor != null) {
-                Log.d(TAG, "Output '$name' shape: ${tensor.info.shape.contentToString()}")
+                val shape = tensor.info.shape
+                Log.w(TAG, "  Output '$name': shape=${shape.contentToString()}, type=${tensor.info.type}")
+                try {
+                    val buf = tensor.floatBuffer
+                    val preview = FloatArray(minOf(10, buf.remaining()))
+                    for (i in preview.indices) preview[i] = buf.get()
+                    buf.rewind()
+                    Log.w(TAG, "  Preview (float): ${preview.contentToString()}")
+                } catch (_: Exception) {
+                    try {
+                        val buf = tensor.longBuffer
+                        val preview = LongArray(minOf(10, buf.remaining()))
+                        for (i in preview.indices) preview[i] = buf.get()
+                        buf.rewind()
+                        Log.w(TAG, "  Preview (long): ${preview.contentToString()}")
+                    } catch (_: Exception) {
+                        Log.w(TAG, "  Could not preview values")
+                    }
+                }
+            } else {
+                Log.w(TAG, "  Output '$name': not OnnxTensor (${value?.javaClass?.simpleName})")
             }
         }
+        Log.e(TAG, "parseMatchesAlternate: RETURNING EMPTY - model output format incompatible")
         return floatArrayOf()
     }
     
@@ -346,7 +385,9 @@ class FeatureTracker(context: Context) {
      */
     private fun computeHomographyRANSAC(matches: FloatArray): FloatArray? {
         val numPoints = matches.size / 4
+        Log.d(TAG, "RANSAC: $numPoints point correspondences, need >= $MIN_MATCHES_FOR_HOMOGRAPHY")
         if (numPoints < MIN_MATCHES_FOR_HOMOGRAPHY) {
+            Log.w(TAG, "RANSAC: INSUFFICIENT POINTS")
             return null
         }
         
@@ -401,12 +442,15 @@ class FeatureTracker(context: Context) {
             }
         }
         
+        Log.d(TAG, "RANSAC: best inliers=$bestInlierCount/$numPoints (${if (numPoints > 0) bestInlierCount * 100 / numPoints else 0}%), need 50%")
+
         // Need at least 50% inliers
         if (bestInlierCount < numPoints / 2) {
-            Log.d(TAG, "Not enough inliers: $bestInlierCount / $numPoints")
+            Log.w(TAG, "RANSAC: FAILED - not enough inliers")
             return null
         }
-        
+
+        Log.i(TAG, "RANSAC: SUCCESS")
         return bestHomography
     }
     

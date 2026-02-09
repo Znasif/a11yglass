@@ -105,8 +105,19 @@ class VizLensProcessor : OnDeviceProcessor {
         strokeWidth = 3f
     }
     
+    // Paint for homography visualization (red)
+    private val homographyPaint = Paint().apply {
+        color = Color.RED
+        style = Paint.Style.STROKE
+        strokeWidth = 4f
+    }
+    
     // Crop region size (pixels) - area around fingertip to analyze
     private val cropRegionSize = 150f
+    
+    // Store reference frame dimensions for homography visualization
+    private var referenceFrameWidth = 0
+    private var referenceFrameHeight = 0
     
     override fun initialize(context: Context) {
         try {
@@ -167,9 +178,12 @@ class VizLensProcessor : OnDeviceProcessor {
                     originalStateDiagram = stateDigram.map { it.copy() }
                     referenceFrameRegistered = true
                     currentHomography = null
+                    referenceFrameWidth = frame.width
+                    referenceFrameHeight = frame.height
                     
                     // Set reference frame for homography tracking (with crop optimization)
                     featureTracker?.setReferenceFrame(frame, stateDigram)
+                    Log.i(TAG, "Reference frame set: ${frame.width}x${frame.height}")
                     
                     // Log all detected text labels for debugging
                     if (stateDigram.isNotEmpty()) {
@@ -197,11 +211,17 @@ class VizLensProcessor : OnDeviceProcessor {
                                     boundingBox = tracker.transformBoundingBox(label.boundingBox, homography)
                                 )
                             }
-                            Log.d(TAG, "Homography applied to ${stateDigram.size} bboxes")
+                            // Log homography matrix for debugging
+                            Log.i(TAG, "HOMOGRAPHY SUCCESS: H=[${homography.take(3).joinToString()}|${homography.drop(3).take(3).joinToString()}|${homography.drop(6).joinToString()}]")
+                            if (stateDigram.isNotEmpty()) {
+                                val first = stateDigram.first()
+                                val orig = originalStateDiagram.first()
+                                Log.i(TAG, "  Box '${first.text}': (${orig.boundingBox.left},${orig.boundingBox.top}) -> (${first.boundingBox.left},${first.boundingBox.top})")
+                            }
                         } else {
                             // Homography failed — bboxes freeze at last known position.
                             // User must say "scan"/"rescan" to re-register.
-                            Log.d(TAG, "Homography failed (consecutive: ${tracker.shouldRescan()}), bboxes frozen")
+                            Log.w(TAG, "HOMOGRAPHY FAILED (shouldRescan: ${tracker.shouldRescan()})")
                         }
                     }
                 }
@@ -384,6 +404,11 @@ class VizLensProcessor : OnDeviceProcessor {
         val output = frame.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(output)
         
+        // Draw RED homography visualization (transformed reference frame corners)
+        currentHomography?.let { H ->
+            drawHomographyVisualization(canvas, H)
+        }
+        
         // Draw all text bounding boxes
         for (label in stateDigram) {
             val paint = if (label == highlightedLabel) highlightPaint else boxPaint
@@ -415,17 +440,68 @@ class VizLensProcessor : OnDeviceProcessor {
         val trackingLost = referenceFrameRegistered && 
             originalStateDiagram.isNotEmpty() && 
             featureTracker?.shouldRescan() == true
+        val hasHomography = currentHomography != null
         val statusText = when {
             !referenceFrameRegistered -> "Say \"scan\" to detect text"
             stateDigram.isEmpty() -> "No text found — say \"rescan\""
             trackingLost -> "Tracking lost — say \"rescan\""
-            fingertip == null -> "Show pointing finger"
+            fingertip == null -> if (hasHomography) "TRACKING (show finger)" else "Show pointing finger"
             highlightedLabel != null -> "→ ${highlightedLabel.text}"
             else -> "Point at text"
         }
         canvas.drawText(statusText, 20f, 60f, textPaint)
         
         return output
+    }
+    
+    /**
+     * Draw red quadrilateral showing the transformed reference frame corners.
+     * This visualizes where the homography thinks the reference content is now.
+     */
+    private fun drawHomographyVisualization(canvas: Canvas, H: FloatArray) {
+        if (referenceFrameWidth <= 0 || referenceFrameHeight <= 0) return
+        
+        // Define the four corners of the reference frame
+        val corners = floatArrayOf(
+            0f, 0f,                                          // Top-left
+            referenceFrameWidth.toFloat(), 0f,               // Top-right
+            referenceFrameWidth.toFloat(), referenceFrameHeight.toFloat(),  // Bottom-right
+            0f, referenceFrameHeight.toFloat()               // Bottom-left
+        )
+        
+        // Transform each corner using homography
+        val transformed = FloatArray(8)
+        for (i in 0 until 4) {
+            val x = corners[i * 2]
+            val y = corners[i * 2 + 1]
+            
+            // Apply homography: H * [x, y, 1]^T
+            val w = H[6] * x + H[7] * y + H[8]
+            if (w != 0f) {
+                transformed[i * 2] = (H[0] * x + H[1] * y + H[2]) / w
+                transformed[i * 2 + 1] = (H[3] * x + H[4] * y + H[5]) / w
+            } else {
+                transformed[i * 2] = x
+                transformed[i * 2 + 1] = y
+            }
+        }
+        
+        // Draw the quadrilateral
+        val path = android.graphics.Path()
+        path.moveTo(transformed[0], transformed[1])  // Top-left
+        path.lineTo(transformed[2], transformed[3])  // Top-right
+        path.lineTo(transformed[4], transformed[5])  // Bottom-right
+        path.lineTo(transformed[6], transformed[7])  // Bottom-left
+        path.close()
+        
+        canvas.drawPath(path, homographyPaint)
+        
+        // Also draw small circles at corners for clarity
+        for (i in 0 until 4) {
+            canvas.drawCircle(transformed[i * 2], transformed[i * 2 + 1], 8f, homographyPaint)
+        }
+        
+        Log.v(TAG, "Drew homography quad: (${transformed[0].toInt()},${transformed[1].toInt()}) -> (${transformed[2].toInt()},${transformed[3].toInt()}) -> (${transformed[4].toInt()},${transformed[5].toInt()}) -> (${transformed[6].toInt()},${transformed[7].toInt()})")
     }
     
     /**
