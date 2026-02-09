@@ -653,7 +653,7 @@ class StreamViewModel(
         val image = YuvImage(nv21, ImageFormat.NV21, videoFrame.width, videoFrame.height, null)
         val out =
             ByteArrayOutputStream().use { stream ->
-                image.compressToJpeg(Rect(0, 0, videoFrame.width, videoFrame.height), 50, stream)
+                image.compressToJpeg(Rect(0, 0, videoFrame.width, videoFrame.height), 95, stream)
                 stream.toByteArray()
             }
 

@@ -8,11 +8,6 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.util.Log
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.Text
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.TextRecognizer
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
@@ -21,9 +16,7 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessor
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessorResult
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
-import kotlin.math.sqrt
 
 /**
  * VizLens Processor: Point at text to have it read aloud.
@@ -56,7 +49,7 @@ class VizLensProcessor : OnDeviceProcessor {
     override val description = "Point at text to hear it read aloud"
     
     private var handLandmarker: HandLandmarker? = null
-    private var textRecognizer: TextRecognizer? = null
+    private var easyOCREngine: EasyOCREngine? = null
     private var featureTracker: FeatureTracker? = null
     private var initContext: Context? = null
     
@@ -128,9 +121,9 @@ class VizLensProcessor : OnDeviceProcessor {
             handLandmarker = HandLandmarker.createFromOptions(context, options)
             Log.d(TAG, "HandLandmarker initialized")
             
-            // Initialize ML Kit Text Recognizer
-            textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-            Log.d(TAG, "ML Kit TextRecognizer initialized")
+            // Initialize EasyOCR engine (CRAFT detector + VGG-LSTM recogniser via ONNX)
+            easyOCREngine = EasyOCREngine(context)
+            Log.d(TAG, "EasyOCR engine initialized")
             
             // Initialize FeatureTracker for homography estimation
             featureTracker = FeatureTracker(context)
@@ -147,9 +140,9 @@ class VizLensProcessor : OnDeviceProcessor {
             val startTime = System.currentTimeMillis()
             
             val landmarker = handLandmarker
-            val recognizer = textRecognizer
+            val ocr = easyOCREngine
             
-            if (landmarker == null || recognizer == null) {
+            if (landmarker == null || ocr == null) {
                 return@withContext OnDeviceProcessorResult(
                     processedImage = frame,
                     text = "VizLens not initialized",
@@ -162,9 +155,7 @@ class VizLensProcessor : OnDeviceProcessor {
                 if (scanRequested) {
                     scanRequested = false
                     
-                    val inputImage = InputImage.fromBitmap(frame, 0)
-                    val visionText = recognizer.process(inputImage).await()
-                    stateDigram = extractTextLabels(visionText)
+                    stateDigram = ocr.detectAndRecognize(frame)
                     originalStateDiagram = stateDigram.map { it.copy() }
                     referenceFrameRegistered = true
                     currentHomography = null
@@ -255,27 +246,6 @@ class VizLensProcessor : OnDeviceProcessor {
                 )
             }
         }
-    
-    /**
-     * Extract text labels and bounding boxes from ML Kit OCR result.
-     */
-    private fun extractTextLabels(visionText: Text): List<TextLabel> {
-        val labels = mutableListOf<TextLabel>()
-        
-        for (block in visionText.textBlocks) {
-            for (line in block.lines) {
-                val boundingBox = line.boundingBox
-                if (boundingBox != null && line.text.isNotBlank()) {
-                    labels.add(TextLabel(
-                        text = line.text.trim(),
-                        boundingBox = boundingBox
-                    ))
-                }
-            }
-        }
-        
-        return labels
-    }
     
     /**
      * Detect if user is making a pointing gesture (index finger extended, others closed).
@@ -467,8 +437,8 @@ class VizLensProcessor : OnDeviceProcessor {
     override fun release() {
         handLandmarker?.close()
         handLandmarker = null
-        textRecognizer?.close()
-        textRecognizer = null
+        easyOCREngine?.release()
+        easyOCREngine = null
         featureTracker?.release()
         featureTracker = null
         stateDigram = emptyList()
