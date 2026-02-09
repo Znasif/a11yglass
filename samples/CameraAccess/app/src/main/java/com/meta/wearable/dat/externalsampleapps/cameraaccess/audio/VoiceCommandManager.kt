@@ -40,6 +40,7 @@ class VoiceCommandManager(private val context: Context) : RecognitionListener {
     sealed class VoiceCommand {
         data class StartProcessor(val processorId: Int, val processorName: String) : VoiceCommand()
         object StopProcessing : VoiceCommand()
+        object TakePhoto : VoiceCommand()  // For VizLens: triggers OCR re-scan
     }
 
     private var speechRecognizer: SpeechRecognizer? = null
@@ -231,6 +232,24 @@ class VoiceCommandManager(private val context: Context) : RecognitionListener {
                 scope.launch {
                     onCommandDetected?.invoke(VoiceCommand.StopProcessing)
                 }
+                return
+            }
+        }
+        
+        // Look for "photo", "scan", "rescan" commands (for VizLens OCR re-scan)
+        val photoKeywords = listOf("take photo", "photo", "scan", "rescan", "re-scan")
+        for (keyword in photoKeywords) {
+            val keywordIndex = text.lastIndexOf(keyword)
+            if (keywordIndex >= 0 && text.length - keywordIndex < 25) {
+                Log.d(TAG, "Detected command: $keyword (photo/scan)")
+                
+                transcriptBuffer.clear()
+                _transcript.value = ""
+                
+                scope.launch {
+                    onCommandDetected?.invoke(VoiceCommand.TakePhoto)
+                }
+                return
             }
         }
     }

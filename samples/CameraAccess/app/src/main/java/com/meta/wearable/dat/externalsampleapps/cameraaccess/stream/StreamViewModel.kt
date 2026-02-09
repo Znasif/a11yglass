@@ -569,6 +569,18 @@ class StreamViewModel(
     // ========== Photo Capture Methods ==========
 
     fun capturePhoto() {
+        val selectedProcessorId = wearablesViewModel.uiState.value.selectedProcessorId
+        
+        // For VizLens processor, camera button triggers OCR re-scan instead of photo capture
+        val processor = OnDeviceProcessorManager.getProcessor(selectedProcessorId)
+        if (processor is com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.vizlens.VizLensProcessor) {
+            Log.d(TAG, "VizLens: Triggering OCR re-scan")
+            processor.resetScene()
+            _uiState.update { it.copy(statusMessage = "Re-scanning text...") }
+            return
+        }
+        
+        // For other processors, capture photo normally
         if (uiState.value.streamSessionState == StreamSessionState.STREAMING) {
             viewModelScope.launch {
                 streamSession?.capturePhoto()?.onSuccess { handlePhotoData(it) }
@@ -818,6 +830,12 @@ class StreamViewModel(
                 if (_uiState.value.isStreamingToServer) {
                     stopServerStreaming()
                 }
+            }
+            is VoiceCommandManager.VoiceCommand.TakePhoto -> {
+                Log.d(TAG, "Voice command: take photo / scan")
+                // This will trigger VizLens OCR re-scan if VizLens is active,
+                // or take a photo for other processors
+                capturePhoto()
             }
         }
     }

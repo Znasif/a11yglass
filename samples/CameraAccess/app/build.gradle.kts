@@ -89,6 +89,10 @@ dependencies {
   implementation(libs.mediapipe.tasks.vision)
   implementation(libs.litertlm.android)
 
+  // VizLens: ML Kit Text Recognition for OCR
+  implementation("com.google.mlkit:text-recognition:16.0.0")
+  implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
+
   // Testing
   androidTestImplementation(libs.androidx.ui.test.junit4)
   androidTestImplementation(libs.androidx.test.uiautomator)

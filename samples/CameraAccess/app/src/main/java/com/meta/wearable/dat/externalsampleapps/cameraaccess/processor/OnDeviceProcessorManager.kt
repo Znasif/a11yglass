@@ -7,6 +7,7 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.basic.Bas
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.fingercount.FingerCountProcessor
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.objectdetection.ObjectDetectionProcessor
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.scenedescription.SceneDescriptionProcessor
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.vizlens.VizLensProcessor
 
 /**
  * Singleton managing the lifecycle of all on-device processors.
@@ -24,11 +25,13 @@ object OnDeviceProcessorManager {
         val fingerCountProcessor = FingerCountProcessor()
         val objectDetectionProcessor = ObjectDetectionProcessor()
         val sceneDescriptionProcessor = SceneDescriptionProcessor()
+        val vizLensProcessor = VizLensProcessor()
 
         processors[basicProcessor.id] = basicProcessor
         processors[fingerCountProcessor.id] = fingerCountProcessor
         processors[objectDetectionProcessor.id] = objectDetectionProcessor
         processors[sceneDescriptionProcessor.id] = sceneDescriptionProcessor
+        processors[vizLensProcessor.id] = vizLensProcessor
 
         for (processor in processors.values) {
             try {
