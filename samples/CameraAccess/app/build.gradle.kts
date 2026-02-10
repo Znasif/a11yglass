@@ -49,6 +49,7 @@ android {
     noCompress += "task"
     noCompress += "litertlm"
     noCompress += "onnx"
+    noCompress += "data"  // ONNX external weight files (XMem models)
   }
   signingConfigs {
     getByName("debug") {

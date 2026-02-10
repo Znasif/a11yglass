@@ -570,7 +570,7 @@ class StreamViewModel(
 
     fun capturePhoto() {
         val selectedProcessorId = wearablesViewModel.uiState.value.selectedProcessorId
-        
+
         // For VizLens processor, camera button triggers OCR re-scan instead of photo capture
         val processor = OnDeviceProcessorManager.getProcessor(selectedProcessorId)
         if (processor is com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.vizlens.VizLensProcessor) {
@@ -579,7 +579,15 @@ class StreamViewModel(
             _uiState.update { it.copy(statusMessage = "Re-scanning text...") }
             return
         }
-        
+
+        // For VideoSegmentation processor, camera button triggers object tracking
+        if (processor is com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.videosegmentation.VideoSegmentationProcessor) {
+            Log.d(TAG, "VideoSegmentation: Triggering track")
+            processor.requestTrack()
+            _uiState.update { it.copy(statusMessage = "Tracking object...") }
+            return
+        }
+
         // For other processors, capture photo normally
         if (uiState.value.streamSessionState == StreamSessionState.STREAMING) {
             viewModelScope.launch {
@@ -836,6 +844,27 @@ class StreamViewModel(
                 // This will trigger VizLens OCR re-scan if VizLens is active,
                 // or take a photo for other processors
                 capturePhoto()
+            }
+            is VoiceCommandManager.VoiceCommand.Track -> {
+                Log.d(TAG, "Voice command: track object")
+                val selectedProcessorId = wearablesViewModel.uiState.value.selectedProcessorId
+                val processor = OnDeviceProcessorManager.getProcessor(selectedProcessorId)
+                if (processor is com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.videosegmentation.VideoSegmentationProcessor) {
+                    processor.requestTrack()
+                    _uiState.update { it.copy(statusMessage = "Tracking object...") }
+                } else {
+                    // If not on VideoSegmentation processor, treat "track" as photo/scan
+                    capturePhoto()
+                }
+            }
+            is VoiceCommandManager.VoiceCommand.StopTracking -> {
+                Log.d(TAG, "Voice command: stop tracking")
+                val selectedProcessorId = wearablesViewModel.uiState.value.selectedProcessorId
+                val processor = OnDeviceProcessorManager.getProcessor(selectedProcessorId)
+                if (processor is com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.videosegmentation.VideoSegmentationProcessor) {
+                    processor.requestStopTrack()
+                    _uiState.update { it.copy(statusMessage = "Tracking stopped") }
+                }
             }
         }
     }

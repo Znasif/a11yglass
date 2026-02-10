@@ -301,7 +301,7 @@ class ObjectDetectionProcessor : OnDeviceProcessor {
                 
                 validCount++
                 if (validCount <= 3) {
-                    Log.d(TAG, "Det $i: score=$score, v1=$v1, v2=$v2, v3=$v3, v4=$v4, class=$classId")
+                    Log.d(TAG, "Det $i: score=$score, v1=$v1, v2=$v2, v3=$v3, v4=$v4, classId=$classId")
                 }
 
                 // Determine if coords are normalized (0-1) or pixel coords
@@ -343,7 +343,8 @@ class ObjectDetectionProcessor : OnDeviceProcessor {
                     y2 = (v4 * scaleY).coerceIn(0f, origHeight.toFloat())
                 }
 
-                val className = if (classId in labels.indices) labels[classId] else "object"
+                // COCO class IDs are 1-indexed (0=background), but labels list is 0-indexed
+                val className = if ((classId - 1) in labels.indices) labels[classId - 1] else "object"
 
                 detections.add(
                     Detection(
@@ -424,7 +425,8 @@ class ObjectDetectionProcessor : OnDeviceProcessor {
                             y2 = (y2Raw * scaleY).coerceIn(0f, origHeight.toFloat())
                         }
                         
-                        val className = if (classId in labels.indices) labels[classId] else "object"
+                        // COCO class IDs are 1-indexed (0=background), but labels list is 0-indexed
+                        val className = if ((classId - 1) in labels.indices) labels[classId - 1] else "object"
                         detections.add(Detection(RectF(x1, y1, x2, y2), classId, className, score))
                     }
                 }

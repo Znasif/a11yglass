@@ -41,6 +41,8 @@ class VoiceCommandManager(private val context: Context) : RecognitionListener {
         data class StartProcessor(val processorId: Int, val processorName: String) : VoiceCommand()
         object StopProcessing : VoiceCommand()
         object TakePhoto : VoiceCommand()  // For VizLens: triggers OCR re-scan
+        object Track : VoiceCommand()       // For VideoSegmentation: triggers object tracking
+        object StopTracking : VoiceCommand() // For VideoSegmentation: stops tracking
     }
 
     private var speechRecognizer: SpeechRecognizer? = null
@@ -242,12 +244,46 @@ class VoiceCommandManager(private val context: Context) : RecognitionListener {
             val keywordIndex = text.lastIndexOf(keyword)
             if (keywordIndex >= 0 && text.length - keywordIndex < 25) {
                 Log.d(TAG, "Detected command: $keyword (photo/scan)")
-                
+
                 transcriptBuffer.clear()
                 _transcript.value = ""
-                
+
                 scope.launch {
                     onCommandDetected?.invoke(VoiceCommand.TakePhoto)
+                }
+                return
+            }
+        }
+
+        // Look for "stop tracking" (must check before "track" to avoid false match)
+        val stopTrackKeywords = listOf("stop tracking", "stop track")
+        for (keyword in stopTrackKeywords) {
+            val keywordIndex = text.lastIndexOf(keyword)
+            if (keywordIndex >= 0 && text.length - keywordIndex < 25) {
+                Log.d(TAG, "Detected command: $keyword (stop tracking)")
+
+                transcriptBuffer.clear()
+                _transcript.value = ""
+
+                scope.launch {
+                    onCommandDetected?.invoke(VoiceCommand.StopTracking)
+                }
+                return
+            }
+        }
+
+        // Look for "track" / "track this" commands (for VideoSegmentation)
+        val trackKeywords = listOf("track this", "track that", "track it", "track")
+        for (keyword in trackKeywords) {
+            val keywordIndex = text.lastIndexOf(keyword)
+            if (keywordIndex >= 0 && text.length - keywordIndex < 25) {
+                Log.d(TAG, "Detected command: $keyword (track)")
+
+                transcriptBuffer.clear()
+                _transcript.value = ""
+
+                scope.launch {
+                    onCommandDetected?.invoke(VoiceCommand.Track)
                 }
                 return
             }
