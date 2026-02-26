@@ -57,7 +57,6 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -314,6 +313,33 @@ class StreamViewModel(
                 }
             }
         }
+
+        // Panorama-specific: when process() signals "Done: N frames", tear down the job
+        // without calling stopServerStreaming() so processedFrame (the stitch) is preserved.
+        if (result.text?.startsWith("Done:") == true) {
+            val processorId = wearablesViewModel.uiState.value.selectedProcessorId
+            if (OnDeviceProcessorManager.getProcessor(processorId) is
+                com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
+            ) {
+                finishPanoramaCapture()
+            }
+        }
+    }
+
+    /**
+     * Terminates the local processing job after a panorama sweep completes.
+     * Does NOT clear processedFrame — the stitched panorama stays visible.
+     */
+    private fun finishPanoramaCapture() {
+        localProcessingJob?.cancel()
+        localProcessingJob = null
+        _uiState.update { current ->
+            current.copy(
+                isStreamingToServer = false,
+                statusMessage = "Panorama complete — tap camera button to restart"
+            )
+        }
+        Log.d(TAG, "Panorama capture finished — stitch preserved in processedFrame")
     }
 
     /**
@@ -577,6 +603,31 @@ class StreamViewModel(
             Log.d(TAG, "VizLens: Triggering OCR re-scan")
             processor.resetScene()
             _uiState.update { it.copy(statusMessage = "Re-scanning text...") }
+            return
+        }
+
+        // For Panorama processor, camera button toggles sweep start/stop
+        if (processor is com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor) {
+            if (processor.isCapturing) {
+                Log.d(TAG, "Panorama: stopping sweep")
+                processor.stopPanorama()
+                _uiState.update { it.copy(statusMessage = "Stitching panorama…") }
+                // process() will handle stopRequested on the next frame, returning
+                // "Done: N frames". handleLocalProcessorResult() detects that text
+                // and calls finishPanoramaCapture() to cancel the job without
+                // clearing processedFrame (which holds the stitched result).
+            } else {
+                Log.d(TAG, "Panorama: starting sweep")
+                // Clear the previous stitch from processedFrame BEFORE state.reset() recycles
+                // the underlying bitmap — drawing a recycled bitmap from Compose crashes.
+                _uiState.update { it.copy(processedFrame = null) }
+                // Re-start local processing if it was stopped after a previous panorama.
+                if (!_uiState.value.isStreamingToServer) {
+                    startServerStreaming()
+                }
+                processor.startPanorama()
+                _uiState.update { it.copy(statusMessage = "Panorama sweep started — pan slowly") }
+            }
             return
         }
 

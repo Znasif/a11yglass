@@ -43,12 +43,11 @@ data class StreamUiState(
     val errorMessage: String? = null,
 ) {
     /**
-     * Get the frame to display - prefer processed frame over raw camera frame.
+     * Get the frame to display.
+     * Prefers processedFrame whenever it is set — this keeps the stitched panorama
+     * visible after isStreamingToServer is cleared (finishPanoramaCapture), and
+     * falls back to the raw camera feed otherwise.
      */
     val displayFrame: Bitmap?
-        get() = if (isStreamingToServer && processedFrame != null) {
-            processedFrame
-        } else {
-            videoFrame
-        }
+        get() = processedFrame ?: videoFrame
 }

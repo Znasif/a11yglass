@@ -7,6 +7,7 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.basic.Bas
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.fingercount.FingerCountProcessor
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.objectdetection.ObjectDetectionProcessor
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.scenedescription.SceneDescriptionProcessor
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.videosegmentation.VideoSegmentationProcessor
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.vizlens.VizLensProcessor
 
@@ -28,6 +29,7 @@ object OnDeviceProcessorManager {
         val sceneDescriptionProcessor = SceneDescriptionProcessor()
         val vizLensProcessor = VizLensProcessor()
         val videoSegmentationProcessor = VideoSegmentationProcessor()
+        val panoramaProcessor = PanoramaProcessor()
 
         processors[basicProcessor.id] = basicProcessor
         processors[fingerCountProcessor.id] = fingerCountProcessor
@@ -35,6 +37,7 @@ object OnDeviceProcessorManager {
         processors[sceneDescriptionProcessor.id] = sceneDescriptionProcessor
         processors[vizLensProcessor.id] = vizLensProcessor
         processors[videoSegmentationProcessor.id] = videoSegmentationProcessor
+        processors[panoramaProcessor.id] = panoramaProcessor
 
         for (processor in processors.values) {
             try {
