@@ -104,11 +104,14 @@ class XMemTracker(context: Context) {
                 }
             }
 
-            // CPU-optimized session options
-            // Note: NNAPI cannot be used because XMem models have 5D tensors (NNAPI only supports ≤4D)
+            // XNNPACK-accelerated session options.
+            // NNAPI must NOT be used: XMem models have 5D tensors and Android NNAPI only supports ≤4D.
+            // Explicitly registering XNNPACK prevents ORT from implicitly delegating to NNAPI,
+            // which can happen on some device firmware versions even without calling addNnapi().
             val sessionOptions = OrtSession.SessionOptions().apply {
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
                 setIntraOpNumThreads(4)
+                addXnnpack(emptyMap())
             }
 
             // Load sessions from file paths (not byte arrays) so ONNX Runtime can find .data files
