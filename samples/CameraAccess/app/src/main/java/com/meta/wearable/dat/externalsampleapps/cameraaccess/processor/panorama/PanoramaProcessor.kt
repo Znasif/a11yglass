@@ -45,6 +45,11 @@ class PanoramaProcessor : OnDeviceProcessor {
     companion object {
         private const val TAG = "PanoramaProcessor"
         private val IDENTITY_H = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)
+
+        // ── Guidance constants ────────────────────────────────────────────────
+        private const val MILESTONE_DEG   = 20f    // announce at 30°, 60°, 90° …
+        private const val SLOW_THRESHOLD  = 3      // consecutive non-advancing frames → nudge
+        private const val MIN_GUIDANCE_MS = 8_000L // minimum gap between any two TTS lines
     }
 
     override val id   = -108
@@ -61,6 +66,11 @@ class PanoramaProcessor : OnDeviceProcessor {
     private val isProcessing = AtomicBoolean(false)
     @Volatile private var startRequested = false
     @Volatile private var stopRequested  = false
+
+    // ── Guidance state (reset each session) ──────────────────────────────────
+    private var lastSpokenMilestoneDeg = 0f   // last milestone already announced
+    private var consecutiveStillFrames = 0    // frames where camera didn't advance
+    private var lastGuidanceMs         = 0L   // wall-clock time of last TTS utterance
 
     // ── Public state ─────────────────────────────────────────────────────────
     val isCapturing: Boolean get() = state.isCapturing
@@ -101,6 +111,9 @@ class PanoramaProcessor : OnDeviceProcessor {
                     startRequested = false
                     state.reset()
                     state.isCapturing = true
+                    lastSpokenMilestoneDeg = 0f
+                    consecutiveStillFrames = 0
+                    lastGuidanceMs = 0L
 
                     featureTracker?.setReferenceFrame(frame, emptyList())
                     state.lastAcceptedFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
@@ -126,7 +139,7 @@ class PanoramaProcessor : OnDeviceProcessor {
                         Log.d(TAG, "Not enough keyframes to stitch (${state.keyframes.size})")
                     }
 
-                    val msg = "Done: ${state.keyframes.size} frames"
+                    val msg = "Panorama complete, ${state.keyframes.size} frames stitched"
                     Log.d(TAG, msg)
                     // Return the stitched panorama full-screen, not wrapped in the live strip overlay.
                     // Subsequent process() calls will keep returning it (see below) until a new
@@ -150,13 +163,23 @@ class PanoramaProcessor : OnDeviceProcessor {
                 }
 
                 // ── Normal capture loop ──────────────────────────────────────
+                var guidanceText: String? = null
+
                 if (state.isCapturing) {
-                    val H = featureTracker?.computeHomography(frame)
+                    val now      = System.currentTimeMillis()
+                    val canSpeak = now - lastGuidanceMs > MIN_GUIDANCE_MS
+                    val H        = featureTracker?.computeHomography(frame)
 
                     if (H == null) {
                         // Bad frame: motion blur, texture-less area, no reference set yet
                         state.skippedCount++
+                        consecutiveStillFrames++
                         Log.d(TAG, "Bad frame (null H) — skipping [total skipped=${state.skippedCount}]")
+                        if (canSpeak && consecutiveStillFrames >= SLOW_THRESHOLD) {
+                            consecutiveStillFrames = 0
+                            lastGuidanceMs = now
+                            guidanceText = "Keep moving"
+                        }
                     } else {
                         val shiftPx  = extractHorizontalShift(H, frame.width, frame.height)
                         val shiftDeg = shiftPx / frame.width * CAMERA_FOV_DEGREES
@@ -164,10 +187,17 @@ class PanoramaProcessor : OnDeviceProcessor {
                         when {
                             abs(shiftDeg) < MIN_CAPTURE_DEGREES -> {
                                 state.skippedCount++
+                                consecutiveStillFrames++
                                 Log.v(TAG, "Too close (${"%.1f".format(shiftDeg)}°) — skip")
+                                if (canSpeak && consecutiveStillFrames >= SLOW_THRESHOLD) {
+                                    consecutiveStillFrames = 0
+                                    lastGuidanceMs = now
+                                    guidanceText = "Keep moving"
+                                }
                             }
 
                             abs(shiftDeg) > MAX_CAPTURE_DEGREES -> {
+                                consecutiveStillFrames = 0
                                 Log.d(TAG, "Too fast (${"%.1f".format(shiftDeg)}°) — discarded, resetting reference")
                                 // Re-anchor to current frame so the next comparison is local
                                 featureTracker?.setReferenceFrame(frame, emptyList())
@@ -176,11 +206,19 @@ class PanoramaProcessor : OnDeviceProcessor {
                             }
 
                             else -> {
+                                consecutiveStillFrames = 0
                                 state.currentAngleDeg += shiftDeg
                                 captureKeyframe(frame, state.currentAngleDeg, H)
                                 featureTracker?.setReferenceFrame(frame, emptyList())
                                 state.lastAcceptedFrame?.let { if (!it.isRecycled) it.recycle() }
                                 state.lastAcceptedFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
+                                // Announce angle milestone (30°, 60°, 90° …)
+                                val milestone = (state.currentAngleDeg / MILESTONE_DEG).toInt() * MILESTONE_DEG
+                                if (canSpeak && milestone >= MILESTONE_DEG && milestone > lastSpokenMilestoneDeg) {
+                                    lastSpokenMilestoneDeg = milestone
+                                    lastGuidanceMs = now
+                                    guidanceText = "${milestone.toInt()} degrees"
+                                }
                             }
                         }
                     }
@@ -189,7 +227,7 @@ class PanoramaProcessor : OnDeviceProcessor {
                 // ── Render strip overlay ─────────────────────────────────────
                 OnDeviceProcessorResult(
                     processedImage = renderFrame(frame),
-                    text = null,
+                    text = guidanceText,
                     processingTimeMs = System.currentTimeMillis() - t0
                 )
 

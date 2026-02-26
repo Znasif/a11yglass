@@ -22,6 +22,9 @@ class PanoramaStitcher {
     companion object {
         private const val TAG = "PanoramaStitcher"
         private const val MAX_CANVAS_DIM = 8192  // Safety cap to avoid OOM on huge sweeps
+        // Android RecordingCanvas rejects bitmaps > ~100MB (hardware-accel limit).
+        // 8192×8192×4 = 268MB → crash. Cap display output so width×height×4 < 100MB.
+        private const val MAX_DISPLAY_WIDTH = 4096
     }
 
     /**
@@ -90,8 +93,27 @@ class PanoramaStitcher {
                 canvas.drawBitmap(keyframes[i].bitmap, m, paint)
             }
 
-            Log.d(TAG, "Stitch complete")
-            output
+            Log.d(TAG, "Stitch complete: ${output.width}×${output.height}")
+
+            // ── 4. Scale to display-safe size ────────────────────────────────
+            // Hardware canvas rejects bitmaps > ~100MB. Normalize height to one
+            // frame height (also eliminates vertical-drift artefact from chained Hs)
+            // and cap width at MAX_DISPLAY_WIDTH.
+            val origW = output.width
+            val origH = output.height
+            val targetH = fH
+            val targetW = (origW.toLong() * targetH / origH)
+                .toInt()
+                .coerceIn(1, MAX_DISPLAY_WIDTH)
+
+            if (targetW != origW || targetH != origH) {
+                val scaled = Bitmap.createScaledBitmap(output, targetW, targetH, true)
+                output.recycle()
+                Log.d(TAG, "Scaled stitch: ${origW}×${origH} → ${targetW}×${targetH}")
+                scaled
+            } else {
+                output
+            }
         } catch (e: OutOfMemoryError) {
             Log.e(TAG, "OOM during stitch — canvas too large? (${canvasW}×${canvasH})")
             null

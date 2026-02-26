@@ -286,6 +286,10 @@ class StreamViewModel(
                         handleLocalProcessorResult(result)
                     } catch (e: Exception) {
                         Log.e(TAG, "Local processing error: ${e.message}")
+                    } catch (e: OutOfMemoryError) {
+                        Log.e(TAG, "OOM in local processor — freeing memory and stopping")
+                        System.gc()
+                        stopServerStreaming()
                     }
                 }
             }
@@ -316,7 +320,7 @@ class StreamViewModel(
 
         // Panorama-specific: when process() signals "Done: N frames", tear down the job
         // without calling stopServerStreaming() so processedFrame (the stitch) is preserved.
-        if (result.text?.startsWith("Done:") == true) {
+        if (result.text?.startsWith("Panorama complete") == true) {
             val processorId = wearablesViewModel.uiState.value.selectedProcessorId
             if (OnDeviceProcessorManager.getProcessor(processorId) is
                 com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
@@ -618,9 +622,11 @@ class StreamViewModel(
                 // clearing processedFrame (which holds the stitched result).
             } else {
                 Log.d(TAG, "Panorama: starting sweep")
-                // Clear the previous stitch from processedFrame BEFORE state.reset() recycles
-                // the underlying bitmap — drawing a recycled bitmap from Compose crashes.
+                // Clear the previous stitch from processedFrame BEFORE state.reset() runs,
+                // then hint GC to release the potentially 200+ MB stitch bitmap before
+                // the new session starts allocating keyframe copies.
                 _uiState.update { it.copy(processedFrame = null) }
+                System.gc()
                 // Re-start local processing if it was stopped after a previous panorama.
                 if (!_uiState.value.isStreamingToServer) {
                     startServerStreaming()
