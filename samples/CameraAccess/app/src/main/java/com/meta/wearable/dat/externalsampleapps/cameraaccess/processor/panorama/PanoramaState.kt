@@ -16,16 +16,19 @@ const val STRIP_VISIBLE_RANGE = 90f      // ±90° visible in strip at once
 /**
  * A single accepted frame in the panorama sweep.
  *
- * @param bitmap     Full-resolution copy kept for Phase-2 stitching.
- * @param thumbnail  Strip-height scaled copy for live preview.
- * @param angleDeg   Accumulated angular position when this frame was captured.
- * @param homography 3×3 row-major H mapping the *previous* keyframe → this one.
- *                   The first keyframe carries an identity matrix.
+ * @param bitmap            Full-resolution copy kept for Phase-2 stitching.
+ * @param thumbnail         Strip-height scaled copy for live preview.
+ * @param angleDeg          Accumulated horizontal angular position when this frame was captured.
+ * @param verticalOffsetPx  Accumulated vertical pixel offset from the H chain.
+ *                          Positive = canvas row shifted downward (camera tilted down).
+ * @param homography        3×3 row-major H mapping the *previous* keyframe → this one.
+ *                          The first keyframe carries an identity matrix.
  */
 data class Keyframe(
     val bitmap: Bitmap,
     val thumbnail: Bitmap,
     val angleDeg: Float,
+    val verticalOffsetPx: Float,
     val homography: FloatArray
 ) {
     // FloatArray doesn't play nicely with data-class equals/hashCode, but we
@@ -48,6 +51,7 @@ data class Keyframe(
 class PanoramaState {
     var isCapturing: Boolean = false
     var currentAngleDeg: Float = 0f
+    var currentVerticalPx: Float = 0f  // Accumulated vertical pixel shift from H chain
     val keyframes: MutableList<Keyframe> = mutableListOf()
     var lastAcceptedFrame: Bitmap? = null  // Reference bitmap kept in sync with FeatureTracker
     var skippedCount: Int = 0
@@ -56,6 +60,7 @@ class PanoramaState {
     fun reset() {
         isCapturing = false
         currentAngleDeg = 0f
+        currentVerticalPx = 0f
         keyframes.forEach {
             if (!it.bitmap.isRecycled)     it.bitmap.recycle()
             if (!it.thumbnail.isRecycled)  it.thumbnail.recycle()

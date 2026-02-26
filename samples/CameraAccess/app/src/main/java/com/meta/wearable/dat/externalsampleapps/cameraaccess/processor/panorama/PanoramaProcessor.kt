@@ -117,7 +117,7 @@ class PanoramaProcessor : OnDeviceProcessor {
 
                     featureTracker?.setReferenceFrame(frame, emptyList())
                     state.lastAcceptedFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
-                    captureKeyframe(frame, 0f, IDENTITY_H.copyOf())
+                    captureKeyframe(frame, 0f, 0f, IDENTITY_H.copyOf())
                     Log.d(TAG, "Panorama session started — first tile at 0°")
 
                     return@withContext OnDeviceProcessorResult(
@@ -208,7 +208,8 @@ class PanoramaProcessor : OnDeviceProcessor {
                             else -> {
                                 consecutiveStillFrames = 0
                                 state.currentAngleDeg += shiftDeg
-                                captureKeyframe(frame, state.currentAngleDeg, H)
+                                state.currentVerticalPx += extractVerticalShift(H, frame.width, frame.height)
+                                captureKeyframe(frame, state.currentAngleDeg, state.currentVerticalPx, H)
                                 featureTracker?.setReferenceFrame(frame, emptyList())
                                 state.lastAcceptedFrame?.let { if (!it.isRecycled) it.recycle() }
                                 state.lastAcceptedFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
@@ -266,15 +267,16 @@ class PanoramaProcessor : OnDeviceProcessor {
      * Create and store a keyframe for [frame] at [angleDeg].
      * The thumbnail is scaled to strip height so it renders quickly.
      */
-    private fun captureKeyframe(frame: Bitmap, angleDeg: Float, H: FloatArray) {
+    private fun captureKeyframe(frame: Bitmap, angleDeg: Float, verticalOffsetPx: Float, H: FloatArray) {
         val thumbH = (frame.height * STRIP_HEIGHT_FRACTION).toInt().coerceAtLeast(1)
         val thumbW = (frame.width.toFloat() / frame.height * thumbH).toInt().coerceAtLeast(1)
         val thumbnail = Bitmap.createScaledBitmap(frame, thumbW, thumbH, true)
         val fullCopy  = frame.copy(Bitmap.Config.ARGB_8888, false)
 
-        state.keyframes.add(Keyframe(fullCopy, thumbnail, angleDeg, H))
+        state.keyframes.add(Keyframe(fullCopy, thumbnail, angleDeg, verticalOffsetPx, H))
         state.keyframes.sortBy { it.angleDeg }
-        Log.d(TAG, "Keyframe accepted: ${"%.1f".format(angleDeg)}°, total=${state.keyframes.size}")
+        Log.d(TAG, "Keyframe accepted: ${"%.1f".format(angleDeg)}° " +
+              "Y=${"%.1f".format(verticalOffsetPx)}px, total=${state.keyframes.size}")
     }
 
     /**
@@ -292,6 +294,22 @@ class PanoramaProcessor : OnDeviceProcessor {
         if (w == 0f) return 0f
         val xCur = (H[0] * cx + H[1] * cy + H[2]) / w
         return cx - xCur
+    }
+
+    /**
+     * Extract vertical pixel shift from a 3×3 row-major homography.
+     *
+     * Same projection as horizontal, but reads the Y coordinate.
+     * When the camera tilts down the scene moves up → yCur < cy → shift > 0.
+     * A positive shift means the canvas row for this frame must move downward.
+     */
+    private fun extractVerticalShift(H: FloatArray, frameWidth: Int, frameHeight: Int): Float {
+        val cx = frameWidth  / 2f
+        val cy = frameHeight / 2f
+        val w  = H[6] * cx + H[7] * cy + H[8]
+        if (w == 0f) return 0f
+        val yCur = (H[3] * cx + H[4] * cy + H[5]) / w
+        return cy - yCur
     }
 
     /**
