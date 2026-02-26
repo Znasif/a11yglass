@@ -5,15 +5,33 @@ import android.graphics.Bitmap.Config.ARGB_8888
 import android.graphics.Canvas
 import android.graphics.Matrix
 import android.graphics.Paint
-import android.graphics.RectF
 import android.util.Log
 
 /**
  * Phase-2 post-hoc stitcher.
  *
- * Called once after the user stops sweeping. Takes all accepted keyframes and
- * their pairwise homographies, chains them into a common canvas space, and
- * composites every frame using simple painter's algorithm (newer frames on top).
+ * Called once after the user stops sweeping. Composites each keyframe onto a
+ * shared canvas using **angle-based pure X-translation** rather than chaining
+ * inverse homographies.
+ *
+ * ## Why not H-chain stitching?
+ * Chaining M_i = M_{i-1} × inv(H_{i-1→i}) accumulates perspective distortion
+ * and vertical drift over many frames: a 10-frame sweep routinely inflates the
+ * estimated canvas to 8192×8192 (268 MB), which Android's hardware canvas
+ * rejects with "Canvas: trying to draw too large bitmap".
+ *
+ * ## Translation approach
+ * Each keyframe already carries `angleDeg`, the accumulated horizontal angle
+ * measured from the first frame.  Converting angle → pixels gives a stable
+ * X-offset with no drift:
+ *
+ *   offsetX(i) = (kf.angleDeg − minAngle) × (frameWidth / CAMERA_FOV_DEGREES)
+ *
+ * Canvas width  = (maxAngle − minAngle) × pxPerDeg + frameWidth
+ * Canvas height = frameHeight  (always exactly one frame tall; no drift)
+ *
+ * Compositing uses painter's algorithm (left-to-right order = earlier keyframes
+ * drawn first, later ones on top at the seam).
  *
  * Threading: Must be called from a background thread (Dispatchers.Default).
  */
@@ -21,17 +39,16 @@ class PanoramaStitcher {
 
     companion object {
         private const val TAG = "PanoramaStitcher"
-        private const val MAX_CANVAS_DIM = 8192  // Safety cap to avoid OOM on huge sweeps
-        // Android RecordingCanvas rejects bitmaps > ~100MB (hardware-accel limit).
-        // 8192×8192×4 = 268MB → crash. Cap display output so width×height×4 < 100MB.
-        private const val MAX_DISPLAY_WIDTH = 4096
+        // Absolute upper bound on canvas width in case CAMERA_FOV_DEGREES is
+        // wrong or the user sweeps more than a full rotation.
+        private const val MAX_CANVAS_WIDTH = 8192
     }
 
     /**
      * Stitch all keyframes into a single panorama bitmap.
      *
      * @param keyframes Ordered list of accepted keyframes (sorted by angleDeg).
-     * @return          Stitched bitmap, or null on failure / < 2 frames.
+     * @return          Stitched bitmap, or null on failure / fewer than 2 frames.
      */
     fun stitch(keyframes: List<Keyframe>): Bitmap? {
         if (keyframes.isEmpty()) return null
@@ -42,133 +59,41 @@ class PanoramaStitcher {
 
         val fW = keyframes[0].bitmap.width
         val fH = keyframes[0].bitmap.height
+        val pxPerDeg = fW.toFloat() / CAMERA_FOV_DEGREES
 
-        // ── 1. Build cumulative canvas-space matrices ────────────────────────
-        // Frame 0 sits at the canvas origin (identity).
-        // For frame i > 0, its stored H maps frame(i-1) → frame(i).
-        // To paint frame i onto the canvas (frame-0 space) we need:
-        //   M_i = M_{i-1} · inv(H_{i-1→i})
-        val matrices = ArrayList<Matrix>(keyframes.size)
-        matrices.add(Matrix())  // identity for frame 0
+        // ── 1. Compute canvas size from angular span ─────────────────────────
+        val minAngle = keyframes.minOf { it.angleDeg }
+        val maxAngle = keyframes.maxOf { it.angleDeg }
+        val spanDeg  = maxAngle - minAngle
 
-        var cumulative = Matrix()
-        for (i in 1 until keyframes.size) {
-            val H = keyframes[i].homography
-            val mH = toAndroidMatrix(H)
-            val mHInv = Matrix()
-            if (mH.invert(mHInv)) {
-                val next = Matrix(cumulative)
-                next.postConcat(mHInv)
-                cumulative = next
-            } else {
-                Log.w(TAG, "Could not invert H for frame $i — reusing previous matrix")
-                cumulative = Matrix(cumulative)
-            }
-            matrices.add(Matrix(cumulative))
-        }
+        val canvasW = (spanDeg * pxPerDeg + fW).toInt().coerceIn(fW, MAX_CANVAS_WIDTH)
+        val canvasH = fH   // horizontal panorama is always exactly one frame tall
 
-        // ── 2. Estimate canvas bounds ────────────────────────────────────────
-        val bounds = estimateBounds(keyframes, matrices, fW, fH)
-        if (bounds.isEmpty) {
-            Log.e(TAG, "Empty bounds — aborting stitch")
-            return null
-        }
+        Log.d(TAG, "Stitching ${keyframes.size} frames onto ${canvasW}×${canvasH} canvas " +
+              "(${String.format("%.1f", spanDeg)}° span)")
 
-        val canvasW = bounds.width().toInt().coerceIn(fW, MAX_CANVAS_DIM)
-        val canvasH = bounds.height().toInt().coerceIn(fH, MAX_CANVAS_DIM)
-        Log.d(TAG, "Stitching ${keyframes.size} frames onto ${canvasW}×${canvasH} canvas")
-
-        // ── 3. Composite onto canvas ─────────────────────────────────────────
+        // ── 2. Composite via pure X-translation ──────────────────────────────
         return try {
             val output = Bitmap.createBitmap(canvasW, canvasH, ARGB_8888)
             val canvas = Canvas(output)
-            val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+            val paint  = Paint(Paint.FILTER_BITMAP_FLAG)
 
-            val offsetX = -bounds.left
-            val offsetY = -bounds.top
-
-            for (i in keyframes.indices) {
-                val m = Matrix(matrices[i])
-                m.postTranslate(offsetX, offsetY)
-                canvas.drawBitmap(keyframes[i].bitmap, m, paint)
+            for (kf in keyframes) {
+                val offsetX = (kf.angleDeg - minAngle) * pxPerDeg
+                val m = Matrix()
+                m.setTranslate(offsetX, 0f)
+                canvas.drawBitmap(kf.bitmap, m, paint)
             }
 
-            Log.d(TAG, "Stitch complete: ${output.width}×${output.height}")
-
-            // ── 4. Scale to display-safe size ────────────────────────────────
-            // Hardware canvas rejects bitmaps > ~100MB. Normalize height to one
-            // frame height (also eliminates vertical-drift artefact from chained Hs)
-            // and cap width at MAX_DISPLAY_WIDTH.
-            val origW = output.width
-            val origH = output.height
-            val targetH = fH
-            val targetW = (origW.toLong() * targetH / origH)
-                .toInt()
-                .coerceIn(1, MAX_DISPLAY_WIDTH)
-
-            if (targetW != origW || targetH != origH) {
-                val scaled = Bitmap.createScaledBitmap(output, targetW, targetH, true)
-                output.recycle()
-                Log.d(TAG, "Scaled stitch: ${origW}×${origH} → ${targetW}×${targetH}")
-                scaled
-            } else {
-                output
-            }
+            Log.d(TAG, "Stitch complete: ${canvasW}×${canvasH}")
+            output
         } catch (e: OutOfMemoryError) {
-            Log.e(TAG, "OOM during stitch — canvas too large? (${canvasW}×${canvasH})")
+            Log.e(TAG, "OOM during stitch (${canvasW}×${canvasH})")
             null
         } catch (e: Exception) {
             Log.e(TAG, "Stitch failed: ${e.message}", e)
             null
         }
-    }
-
-    /**
-     * Convert a 3×3 row-major FloatArray homography to an Android [Matrix].
-     * Layout: [row0col0, row0col1, row0col2, row1col0, row1col1, row1col2, row2col0, row2col1, row2col2]
-     */
-    private fun toAndroidMatrix(H: FloatArray): Matrix {
-        val m = Matrix()
-        m.setValues(floatArrayOf(H[0], H[1], H[2], H[3], H[4], H[5], H[6], H[7], H[8]))
-        return m
-    }
-
-    /**
-     * Project each frame's four corners through its canvas-space matrix and
-     * return the axis-aligned bounding rectangle of all projected corners.
-     */
-    private fun estimateBounds(
-        keyframes: List<Keyframe>,
-        matrices: List<Matrix>,
-        fW: Int,
-        fH: Int
-    ): RectF {
-        val corners = floatArrayOf(
-            0f, 0f,
-            fW.toFloat(), 0f,
-            fW.toFloat(), fH.toFloat(),
-            0f, fH.toFloat()
-        )
-
-        var minX = Float.MAX_VALUE
-        var minY = Float.MAX_VALUE
-        var maxX = -Float.MAX_VALUE
-        var maxY = -Float.MAX_VALUE
-
-        for (i in keyframes.indices) {
-            val pts = corners.copyOf()
-            matrices[i].mapPoints(pts)
-            for (j in 0 until 4) {
-                val x = pts[j * 2]
-                val y = pts[j * 2 + 1]
-                if (x < minX) minX = x
-                if (y < minY) minY = y
-                if (x > maxX) maxX = x
-                if (y > maxY) maxY = y
-            }
-        }
-
-        return RectF(minX, minY, maxX, maxY)
     }
 
     fun release() { /* stateless — nothing to release */ }
