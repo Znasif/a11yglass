@@ -87,30 +87,34 @@ class SceneDescriptionProcessor : OnDeviceProcessor {
         clearXnnpackCache(context)
 
         return try {
-            // Try GPU first for faster inference, fallback to CPU
-            val useGpu = try {
-                // Test if GPU backend is available
-                true
-            } catch (e: Exception) {
-                Log.w(TAG, "GPU not available, using CPU: ${e.message}")
-                false
-            }
-            
-            val config = EngineConfig(
+            val gpuConfig = EngineConfig(
                 modelPath = modelFile.absolutePath,
-                backend = if (useGpu) Backend.GPU else Backend.CPU,
+                backend = Backend.GPU,
                 cacheDir = context.cacheDir.path,
-                visionBackend = if (useGpu) Backend.GPU else Backend.CPU
+                visionBackend = Backend.GPU
             )
-            Log.d(TAG, "Using ${if (useGpu) "GPU" else "CPU"} backend for FastVLM")
-            engine = Engine(config)
-            engine!!.initialize()
+            try {
+                Log.d(TAG, "Trying GPU backend for FastVLM")
+                engine = Engine(gpuConfig)
+                engine!!.initialize()
+                Log.d(TAG, "FastVLM engine initialized with GPU backend")
+            } catch (gpuEx: Exception) {
+                Log.w(TAG, "GPU backend unavailable, falling back to CPU: ${gpuEx.message}")
+                engine?.close()
+                val cpuConfig = EngineConfig(
+                    modelPath = modelFile.absolutePath,
+                    backend = Backend.CPU,
+                    cacheDir = context.cacheDir.path,
+                    visionBackend = Backend.CPU
+                )
+                engine = Engine(cpuConfig)
+                engine!!.initialize()
+                Log.d(TAG, "FastVLM engine initialized with CPU backend")
+            }
             isInitialized = true
-            Log.d(TAG, "FastVLM engine initialized successfully")
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize engine: ${e.message}", e)
-            // Try once more after clearing cache
             clearXnnpackCache(context)
             false
         }
