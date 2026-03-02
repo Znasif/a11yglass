@@ -50,6 +50,8 @@ litert-support = { group = "com.google.ai.edge.litert", name = "litert-support",
 mediapipe-tasks-vision = { group = "com.google.mediapipe", name = "tasks-vision", version.ref = "mediapipeTasks" }
 litertlm-android = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version.ref = "litertlm" }
 
+androidx-webkit = { group = "androidx.webkit", name = "webkit", version = "1.12.1" }
+
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 jetbrains-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
