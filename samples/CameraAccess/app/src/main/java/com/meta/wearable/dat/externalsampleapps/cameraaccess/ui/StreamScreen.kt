@@ -113,22 +113,35 @@ fun StreamScreenContent(
     Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
         // Video frame display (prefer processed frame if streaming to server)
         streamUiState.displayFrame?.let { frame ->
-            if (streamUiState.captureButtonMode == CaptureButtonMode.PANORAMA_DONE) {
-                // Stitched panorama: full pan/pinch-zoom viewer
-                Image(
-                    bitmap = frame.asImageBitmap(),
-                    contentDescription = stringResource(R.string.live_stream),
-                    modifier = Modifier.fillMaxSize().zoomable(panoramaZoomState),
-                    contentScale = ContentScale.Fit,
-                )
-            } else {
-                // Live camera feed or in-progress processor overlay
-                Image(
-                    bitmap = frame.asImageBitmap(),
-                    contentDescription = stringResource(R.string.live_stream),
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Inside,
-                )
+            when (streamUiState.captureButtonMode) {
+                CaptureButtonMode.PANORAMA_DONE -> {
+                    // Stitched panorama: full pan/pinch-zoom viewer
+                    Image(
+                        bitmap = frame.asImageBitmap(),
+                        contentDescription = stringResource(R.string.live_stream),
+                        modifier = Modifier.fillMaxSize().zoomable(panoramaZoomState),
+                        contentScale = ContentScale.Fit,
+                    )
+                }
+                CaptureButtonMode.PROXY_ACTIVE -> {
+                    // Reality Proxy: renderer draws its own overlay (no touch zoom;
+                    // head movement is the navigation modality)
+                    Image(
+                        bitmap = frame.asImageBitmap(),
+                        contentDescription = stringResource(R.string.live_stream),
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Fit,
+                    )
+                }
+                else -> {
+                    // Live camera feed or in-progress processor overlay
+                    Image(
+                        bitmap = frame.asImageBitmap(),
+                        contentDescription = stringResource(R.string.live_stream),
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Inside,
+                    )
+                }
             }
         }
 
@@ -224,8 +237,9 @@ fun StreamScreenContent(
             }
         }
 
-        // Bottom controls
-        Column(
+        // Bottom controls — hidden in Reality Proxy mode so the rendered overlay
+        // (which draws its own detail panel) is fully visible.
+        if (streamUiState.captureButtonMode != CaptureButtonMode.PROXY_ACTIVE) Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.BottomCenter)

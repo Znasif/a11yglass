@@ -633,35 +633,57 @@ class StreamViewModel(
             return
         }
 
-        // For Panorama processor, camera button toggles sweep start/stop
+        // For Panorama processor: 4-way state machine on camera button
         if (processor is com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor) {
-            if (processor.isCapturing) {
-                Log.d(TAG, "Panorama: stopping sweep")
-                processor.stopPanorama()
-                _uiState.update { it.copy(
-                    statusMessage = "Stitching panorama…",
-                    captureButtonMode = CaptureButtonMode.CAMERA,
-                ) }
-                // process() will handle stopRequested on the next frame, returning
-                // "Done: N frames". handleLocalProcessorResult() detects that text
-                // and calls finishPanoramaCapture() to cancel the job without
-                // clearing processedFrame (which holds the stitched result).
-            } else {
-                Log.d(TAG, "Panorama: starting sweep")
-                // Clear the previous stitch from processedFrame BEFORE state.reset() runs,
-                // then hint GC to release the potentially 200+ MB stitch bitmap before
-                // the new session starts allocating keyframe copies.
-                _uiState.update { it.copy(processedFrame = null) }
-                System.gc()
-                // Re-start local processing if it was stopped after a previous panorama.
-                if (!_uiState.value.isStreamingToServer) {
-                    startServerStreaming()
+            when {
+                processor.isCapturing -> {
+                    // ── Stop sweep ───────────────────────────────────────────
+                    Log.d(TAG, "Panorama: stopping sweep")
+                    processor.stopPanorama()
+                    _uiState.update { it.copy(
+                        statusMessage = "Stitching panorama…",
+                        captureButtonMode = CaptureButtonMode.CAMERA,
+                    ) }
+                    // process() handles stopRequested on the next frame and returns
+                    // "Panorama complete, N frames stitched". handleLocalProcessorResult()
+                    // detects that text and calls finishPanoramaCapture() to cancel the
+                    // job without clearing processedFrame (the stitched result).
                 }
-                processor.startPanorama()
-                _uiState.update { it.copy(
-                    statusMessage = "Panorama sweep started — pan slowly",
-                    captureButtonMode = CaptureButtonMode.RECORDING,
-                ) }
+
+                processor.phase == com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaPhase.REALITY_PROXY -> {
+                    // ── Exit Reality Proxy ───────────────────────────────────
+                    Log.d(TAG, "Panorama: exiting Reality Proxy")
+                    processor.exitRealityProxy()
+                    finishPanoramaCapture()   // cancels localProcessingJob, preserves processedFrame
+                    _uiState.update { it.copy(statusMessage = "Panorama ready — tap camera to enter proxy mode") }
+                }
+
+                processor.hasStitchedResult -> {
+                    // ── Enter Reality Proxy ──────────────────────────────────
+                    Log.d(TAG, "Panorama: entering Reality Proxy")
+                    if (!_uiState.value.isStreamingToServer) startServerStreaming()
+                    processor.enterRealityProxy()
+                    _uiState.update { it.copy(
+                        statusMessage = "Reality Proxy — look at objects",
+                        captureButtonMode = CaptureButtonMode.PROXY_ACTIVE,
+                    ) }
+                }
+
+                else -> {
+                    // ── Start new sweep ──────────────────────────────────────
+                    Log.d(TAG, "Panorama: starting sweep")
+                    // Clear the previous stitch from processedFrame BEFORE state.reset() runs,
+                    // then hint GC to release the potentially 200+ MB stitch bitmap before
+                    // the new session starts allocating keyframe copies.
+                    _uiState.update { it.copy(processedFrame = null) }
+                    System.gc()
+                    if (!_uiState.value.isStreamingToServer) startServerStreaming()
+                    processor.startPanorama()
+                    _uiState.update { it.copy(
+                        statusMessage = "Panorama sweep started — pan slowly",
+                        captureButtonMode = CaptureButtonMode.RECORDING,
+                    ) }
+                }
             }
             return
         }
