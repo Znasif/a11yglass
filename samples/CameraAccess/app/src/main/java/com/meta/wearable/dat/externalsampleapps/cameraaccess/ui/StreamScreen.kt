@@ -25,6 +25,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.CaptureButtonMode
+import me.saket.telephoto.zoomable.rememberZoomableState
+import me.saket.telephoto.zoomable.zoomable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -102,15 +106,30 @@ fun StreamScreenContent(
     onHideShareDialog: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // Zoomable state for the panorama result viewer. Declared unconditionally per
+    // Compose rules; only wired up when captureButtonMode == PANORAMA_DONE.
+    val panoramaZoomState = rememberZoomableState()
+
     Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
         // Video frame display (prefer processed frame if streaming to server)
         streamUiState.displayFrame?.let { frame ->
-            Image(
-                bitmap = frame.asImageBitmap(),
-                contentDescription = stringResource(R.string.live_stream),
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Inside,
-            )
+            if (streamUiState.captureButtonMode == CaptureButtonMode.PANORAMA_DONE) {
+                // Stitched panorama: full pan/pinch-zoom viewer
+                Image(
+                    bitmap = frame.asImageBitmap(),
+                    contentDescription = stringResource(R.string.live_stream),
+                    modifier = Modifier.fillMaxSize().zoomable(panoramaZoomState),
+                    contentScale = ContentScale.Fit,
+                )
+            } else {
+                // Live camera feed or in-progress processor overlay
+                Image(
+                    bitmap = frame.asImageBitmap(),
+                    contentDescription = stringResource(R.string.live_stream),
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Inside,
+                )
+            }
         }
 
         // Loading indicator when starting
@@ -235,8 +254,9 @@ fun StreamScreenContent(
                     onClick = onCycleTimerMode,
                 )
 
-                // Photo capture button
+                // Photo capture button (icon/color reflect current processor phase)
                 CaptureButton(
+                    mode = streamUiState.captureButtonMode,
                     onClick = onCapturePhoto,
                 )
             }

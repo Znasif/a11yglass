@@ -15,6 +15,13 @@ package com.meta.wearable.dat.externalsampleapps.cameraaccess.stream
 import android.graphics.Bitmap
 import com.meta.wearable.dat.camera.types.StreamSessionState
 
+enum class CaptureButtonMode {
+    CAMERA,        // Default: start sweep / photo capture
+    RECORDING,     // Panorama sweep in progress — shows Stop
+    PANORAMA_DONE, // Stitched panorama ready — press to enter Reality Proxy
+    PROXY_ACTIVE,  // In Reality Proxy mode — press to exit
+}
+
 data class StreamUiState(
     // DAT streaming state
     val streamSessionState: StreamSessionState = StreamSessionState.STOPPED,
@@ -38,6 +45,9 @@ data class StreamUiState(
     val voiceTranscript: String = "",      // Last 50 chars of transcript
     val isVoiceListening: Boolean = false, // Shows if voice commands are active
     
+    // Camera button mode (changes per processor phase)
+    val captureButtonMode: CaptureButtonMode = CaptureButtonMode.CAMERA,
+
     // Status
     val statusMessage: String = "",
     val errorMessage: String? = null,

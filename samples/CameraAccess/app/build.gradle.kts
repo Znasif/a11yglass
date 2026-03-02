@@ -98,6 +98,9 @@ dependencies {
   // VizLens: ONNX Runtime for Homography Tracking (SuperPoint+LightGlue)
   implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.0")
 
+  // Pinch-to-zoom / pan for panorama result viewer
+  implementation(libs.telephoto.zoomable)
+
   // Testing
   androidTestImplementation(libs.androidx.ui.test.junit4)
   androidTestImplementation(libs.androidx.test.uiautomator)

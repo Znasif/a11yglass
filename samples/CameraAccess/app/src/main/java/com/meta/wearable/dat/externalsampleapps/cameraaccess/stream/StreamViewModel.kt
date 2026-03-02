@@ -207,8 +207,6 @@ class StreamViewModel(
             }
         }
 
-        // Start voice command recognition
-        startVoiceCommands()
     }
 
     fun stopStream() {
@@ -340,7 +338,8 @@ class StreamViewModel(
         _uiState.update { current ->
             current.copy(
                 isStreamingToServer = false,
-                statusMessage = "Panorama complete — tap camera button to restart"
+                statusMessage = "Panorama ready — tap camera button to restart",
+                captureButtonMode = CaptureButtonMode.PANORAMA_DONE,
             )
         }
         Log.d(TAG, "Panorama capture finished — stitch preserved in processedFrame")
@@ -503,13 +502,37 @@ class StreamViewModel(
     }
 
     /**
-     * Toggle audio streaming on/off.
+     * Toggle microphone on/off.
+     *
+     * Enabling: always starts voice-command recognition (MLKit), and additionally
+     * streams PCM audio to the server if a server connection is already open.
+     * Disabling: stops both voice commands and server audio streaming.
      */
     fun toggleAudioStreaming() {
         if (_uiState.value.isAudioStreaming) {
-            stopAudioStreaming()
+            // Stop voice commands and server audio
+            stopVoiceCommands()
+            audioStreamManager.stopRecording()
+            if (wearablesViewModel.serverRepository.isConnected()) {
+                wearablesViewModel.serverRepository.sendAudioStop()
+            }
+            _uiState.update { it.copy(isAudioStreaming = false, statusMessage = "Microphone off") }
+            Log.d(TAG, "Microphone disabled")
         } else {
-            startAudioStreaming()
+            if (!audioStreamManager.hasRecordingPermission()) {
+                _uiState.update { it.copy(errorMessage = "Microphone permission required") }
+                return
+            }
+            // Voice commands always start with the mic
+            startVoiceCommands()
+            // Server audio streaming only when connected
+            if (wearablesViewModel.serverRepository.isConnected()) {
+                audioStreamManager.startRecording { chunk ->
+                    wearablesViewModel.serverRepository.sendAudioChunk(chunk)
+                }
+            }
+            _uiState.update { it.copy(isAudioStreaming = true, statusMessage = "Microphone on") }
+            Log.d(TAG, "Microphone enabled")
         }
     }
 
@@ -615,7 +638,10 @@ class StreamViewModel(
             if (processor.isCapturing) {
                 Log.d(TAG, "Panorama: stopping sweep")
                 processor.stopPanorama()
-                _uiState.update { it.copy(statusMessage = "Stitching panorama…") }
+                _uiState.update { it.copy(
+                    statusMessage = "Stitching panorama…",
+                    captureButtonMode = CaptureButtonMode.CAMERA,
+                ) }
                 // process() will handle stopRequested on the next frame, returning
                 // "Done: N frames". handleLocalProcessorResult() detects that text
                 // and calls finishPanoramaCapture() to cancel the job without
@@ -632,7 +658,10 @@ class StreamViewModel(
                     startServerStreaming()
                 }
                 processor.startPanorama()
-                _uiState.update { it.copy(statusMessage = "Panorama sweep started — pan slowly") }
+                _uiState.update { it.copy(
+                    statusMessage = "Panorama sweep started — pan slowly",
+                    captureButtonMode = CaptureButtonMode.RECORDING,
+                ) }
             }
             return
         }
