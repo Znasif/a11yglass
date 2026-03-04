@@ -8,6 +8,7 @@ import android.graphics.Paint
 import android.util.Log
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessor
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessorResult
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.florence.FlorenceProcessor
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.vizlens.FeatureTracker
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
@@ -70,6 +71,17 @@ class PanoramaProcessor : OnDeviceProcessor {
     private val hierarchyBuilder   = PanoramaHierarchyBuilder()
     private var localizer: PanoramaLocalizer? = null
     private val realityProxyRenderer = RealityProxyRenderer()
+
+    /**
+     * Optional Florence-2 processor used to build a semantic hierarchy after
+     * stitching. Set via [setFlorenceProcessor] from [OnDeviceProcessorManager]
+     * after both processors are created. If null, falls back to angle-labelled nodes.
+     */
+    private var florenceProcessor: FlorenceProcessor? = null
+
+    fun setFlorenceProcessor(fp: FlorenceProcessor) {
+        florenceProcessor = fp
+    }
 
     // Long-lived scope for hierarchy building — survives localProcessingJob cancellation.
     private val processorScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -163,15 +175,38 @@ class PanoramaProcessor : OnDeviceProcessor {
 
                     state.phase = PanoramaPhase.IDLE
 
-                    // Launch hierarchy build in processorScope (outlives localProcessingJob)
-                    val panoramaWidth = state.stitchedResult?.width
-                    if (panoramaWidth != null) {
-                        val keyframeSnapshot = state.keyframes.toList()
+                    // Launch scene analysis in processorScope (outlives localProcessingJob).
+                    // Reality Proxy is gated on this completing (enterRealityProxy checks
+                    // state.hierarchyNodes.isNotEmpty()).
+                    val panorama         = state.stitchedResult
+                    val panoramaWidth    = panorama?.width
+                    val keyframeSnapshot = state.keyframes.toList()
+                    if (panoramaWidth != null && panorama != null) {
+                        val fp = florenceProcessor
                         processorScope.launch {
-                            val nodes = hierarchyBuilder.build(keyframeSnapshot, panoramaWidth)
+                            val nodes: List<HierarchyNode>
+                            if (fp != null) {
+                                Log.d(TAG, "Launching Florence scene analysis on ${panorama.width}×${panorama.height} panorama…")
+                                val regions = fp.analyzeRegions(panorama)
+                                nodes = if (regions.isNotEmpty()) {
+                                    val minAngle = keyframeSnapshot.minOf { it.angleDeg }
+                                    val maxAngle = keyframeSnapshot.maxOf { it.angleDeg }
+                                    val fov = keyframeSnapshot.firstOrNull()?.bitmap?.let {
+                                        cameraHFovDeg(it.width, it.height)
+                                    } ?: 65f
+                                    hierarchyBuilder.buildFromFlorence(
+                                        regions, panoramaWidth, minAngle, maxAngle, fov
+                                    ).also { Log.d(TAG, "Florence hierarchy: ${it.size} nodes") }
+                                } else {
+                                    Log.d(TAG, "Florence returned no regions — falling back to angle labels")
+                                    hierarchyBuilder.build(keyframeSnapshot, panoramaWidth)
+                                }
+                            } else {
+                                nodes = hierarchyBuilder.build(keyframeSnapshot, panoramaWidth)
+                            }
                             hierarchyBuilder.setNodes(nodes)
                             state.hierarchyNodes = nodes
-                            Log.d(TAG, "Hierarchy built: ${nodes.size} nodes")
+                            Log.d(TAG, "Hierarchy ready: ${nodes.size} nodes")
                         }
                     }
 
@@ -272,7 +307,7 @@ class PanoramaProcessor : OnDeviceProcessor {
                         }
                     } else {
                         val shiftPx  = extractHorizontalShift(H, frame.width, frame.height)
-                        val shiftDeg = shiftPx / frame.width * CAMERA_FOV_DEGREES
+                        val shiftDeg = shiftPx / frame.width * cameraHFovDeg(frame.width, frame.height)
 
                         when {
                             abs(shiftDeg) < MIN_CAPTURE_DEGREES -> {
@@ -352,11 +387,24 @@ class PanoramaProcessor : OnDeviceProcessor {
         Log.d(TAG, "stopPanorama() requested")
     }
 
-    /** Enter Reality Proxy mode. No-op if no stitched result exists. */
+    /**
+     * Enter Reality Proxy mode.
+     *
+     * No-op if no stitched result exists, or if scene analysis (Florence or
+     * fallback hierarchy build) has not yet completed. The UI shows
+     * "Building scene map…" while waiting; the user can try again once that
+     * message disappears.
+     */
     fun enterRealityProxy() {
-        if (state.stitchedResult != null) {
-            realityProxyRequested = true
-            Log.d(TAG, "enterRealityProxy() requested")
+        when {
+            state.stitchedResult == null ->
+                Log.d(TAG, "enterRealityProxy() ignored — no stitched result yet")
+            state.hierarchyNodes.isEmpty() ->
+                Log.d(TAG, "enterRealityProxy() blocked — scene analysis still running")
+            else -> {
+                realityProxyRequested = true
+                Log.d(TAG, "enterRealityProxy() requested")
+            }
         }
     }
 

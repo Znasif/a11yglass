@@ -65,7 +65,7 @@ class PanoramaStitcher {
 
         val fW = keyframes[0].bitmap.width
         val fH = keyframes[0].bitmap.height
-        val pxPerDeg = fW.toFloat() / CAMERA_FOV_DEGREES
+        val pxPerDeg = fW.toFloat() / cameraHFovDeg(fW, fH)
 
         // ── 1. Compute canvas bounds ─────────────────────────────────────────
         val minAngle = keyframes.minOf { it.angleDeg }

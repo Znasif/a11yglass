@@ -1,49 +1,80 @@
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama
 
+import android.graphics.RectF
 import kotlin.math.abs
 
 /**
  * Builds and queries the Level-1 hierarchy tree from keyframes right after stitching.
  *
- * build() is called from processorScope (background thread) immediately after Phase 2.
+ * build() / buildFromFlorence() are called from processorScope (background thread).
  * Once built, nodes is read-only during REALITY_PROXY.
- *
- * v2 (deferred): After build() returns, iterate nodes, write each keyframe crop to a
- * temp file, call FastVLM Engine, and update node.description progressively.
  */
 class PanoramaHierarchyBuilder {
 
     @Volatile private var nodes: List<HierarchyNode> = emptyList()
+    // Cached after build() so findNodeAt() uses the real FOV, not a hardcoded guess.
+    @Volatile private var computedFovDeg: Float = 65f
 
     /**
-     * Build a Level-1 hierarchy from keyframes.
-     *
-     * Algorithm:
-     *   totalSpan = max(maxAngle - minAngle, CAMERA_FOV_DEGREES)  // guard zero-span
-     *   For each keyframe kf:
-     *     xFraction     = (kf.angleDeg - minAngle) / totalSpan
-     *     widthFraction = CAMERA_FOV_DEGREES / totalSpan
-     *     label         = "${kf.angleDeg.toInt()}°"
+     * Build a fallback Level-1 hierarchy from keyframes (one node per keyframe,
+     * labelled by angle). Used when Florence is unavailable or returns nothing.
      *
      * @param keyframes    Accepted keyframes (sorted by angleDeg).
-     * @param panoramaWidth Width of the stitched bitmap in px (for future Level-2 use).
-     * @return             List of Level-1 nodes sorted by angleDeg.
+     * @param panoramaWidth Width of the stitched bitmap in px.
      */
     fun build(keyframes: List<Keyframe>, panoramaWidth: Int): List<HierarchyNode> {
         if (keyframes.isEmpty()) return emptyList()
 
+        val sampleBmp = keyframes.first().bitmap
+        computedFovDeg = cameraHFovDeg(sampleBmp.width, sampleBmp.height)
+
         val minAngle  = keyframes.minOf { it.angleDeg }
         val maxAngle  = keyframes.maxOf { it.angleDeg }
-        // Clamp to at least one FOV worth of span to avoid division by zero
-        val totalSpan = (maxAngle - minAngle).coerceAtLeast(CAMERA_FOV_DEGREES)
+        val totalSpan = (maxAngle - minAngle).coerceAtLeast(computedFovDeg)
 
         return keyframes.mapIndexed { index, kf ->
             HierarchyNode(
-                label                = "${kf.angleDeg.toInt()}°",
-                angleDeg             = kf.angleDeg,
-                panoramaXFraction    = (kf.angleDeg - minAngle) / totalSpan,
-                panoramaWidthFraction = CAMERA_FOV_DEGREES / totalSpan,
-                keyframeIndex        = index,
+                label                 = "${kf.angleDeg.toInt()}°",
+                angleDeg              = kf.angleDeg,
+                panoramaXFraction     = (kf.angleDeg - minAngle) / totalSpan,
+                panoramaWidthFraction = computedFovDeg / totalSpan,
+                keyframeIndex         = index,
+            )
+        }.sortedBy { it.angleDeg }
+    }
+
+    /**
+     * Build a semantic hierarchy from Florence-2 dense region captions.
+     *
+     * [regions] is a list of (bbox-in-panorama-px, label) pairs. The bbox's
+     * horizontal centre maps to an angle; width maps to a panoramaWidthFraction.
+     *
+     * @param regions       Florence regions (bbox in panorama pixel coordinates).
+     * @param panoramaWidth  Width of the stitched panorama bitmap in px.
+     * @param minAngleDeg   Minimum angle in the panorama sweep.
+     * @param maxAngleDeg   Maximum angle in the panorama sweep.
+     * @param fallbackFovDeg Horizontal FOV, used to seed computedFovDeg for findNodeAt().
+     */
+    fun buildFromFlorence(
+        regions: List<Pair<RectF, String>>,
+        panoramaWidth: Int,
+        minAngleDeg: Float,
+        maxAngleDeg: Float,
+        fallbackFovDeg: Float,
+    ): List<HierarchyNode> {
+        if (regions.isEmpty()) return emptyList()
+        computedFovDeg = fallbackFovDeg
+        val span = (maxAngleDeg - minAngleDeg).coerceAtLeast(1f)
+
+        return regions.mapIndexed { index, (bbox, label) ->
+            val xFraction     = (bbox.centerX() / panoramaWidth).coerceIn(0f, 1f)
+            val widthFraction = (bbox.width()   / panoramaWidth).coerceIn(0.01f, 1f)
+            HierarchyNode(
+                label                 = label,
+                angleDeg              = minAngleDeg + xFraction * span,
+                panoramaXFraction     = xFraction,
+                panoramaWidthFraction = widthFraction,
+                keyframeIndex         = index,
             )
         }.sortedBy { it.angleDeg }
     }
@@ -56,11 +87,14 @@ class PanoramaHierarchyBuilder {
      * half a FOV of it. Ties broken by closest centre distance.
      */
     fun findNodeAt(angleDeg: Float): HierarchyNode? {
-        val halfFov = CAMERA_FOV_DEGREES / 2f
+        val halfFov = computedFovDeg / 2f
         return nodes
             .filter { abs(it.angleDeg - angleDeg) < halfFov }
             .minByOrNull { abs(it.angleDeg - angleDeg) }
     }
 
-    fun clear() { nodes = emptyList() }
+    fun clear() {
+        nodes = emptyList()
+        computedFovDeg = 65f
+    }
 }

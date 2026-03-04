@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dir D:\\\\Projects\\\\a11yglass\\\\samples\\\\CameraAccess:*)"
+      "Bash(dir D:\\\\Projects\\\\a11yglass\\\\samples\\\\CameraAccess:*)",
+      "mcp__ide__getDiagnostics"
     ]
   }
 }

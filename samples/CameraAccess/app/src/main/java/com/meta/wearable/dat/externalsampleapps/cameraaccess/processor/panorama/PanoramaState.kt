@@ -2,17 +2,40 @@ package com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama
 
 import android.graphics.Bitmap
 import kotlin.math.abs
+import kotlin.math.atan
+import kotlin.math.sqrt
+import kotlin.math.tan
 
 // ── Thresholds ──────────────────────────────────────────────────────────────
 // At ~0.17fps (5-9s per ONNX inference), a comfortable 5°/s pan accumulates
 // 25-45° between measurements. MIN/MAX are calibrated accordingly.
-const val MIN_CAPTURE_DEGREES = 3f       // Below → too close, skip
-const val MAX_CAPTURE_DEGREES = 50f      // Above → too fast, discard  (was 20°)
-const val GAP_WARN_DEGREES    = 80f      // Gap marker threshold in strip (was 40°)
-const val CAMERA_FOV_DEGREES  = 65f      // Assumed horizontal FOV
-const val PX_PER_DEG          = 4f       // Strip pixels per degree
+const val MIN_CAPTURE_DEGREES  = 3f      // Below → too close, skip
+const val MAX_CAPTURE_DEGREES  = 50f     // Above → too fast, discard  (was 20°)
+const val GAP_WARN_DEGREES     = 80f     // Gap marker threshold in strip (was 40°)
+const val DIAGONAL_FOV_DEGREES = 105f    // Ray-Ban Meta hardware spec: 105° diagonal FOV
+const val POINTING_FRACTION    = 0.35f   // Centre-crop fraction for the Reality Proxy live window
+const val PX_PER_DEG           = 4f      // Strip pixels per degree
 const val STRIP_HEIGHT_FRACTION = 0.22f  // Bottom fraction used by strip
-const val STRIP_VISIBLE_RANGE = 90f      // ±90° visible in strip at once
+const val STRIP_VISIBLE_RANGE  = 90f     // ±90° visible in strip at once
+
+/**
+ * Compute the camera's horizontal FOV from the Ray-Ban Meta's known diagonal
+ * FOV and the actual frame pixel dimensions (pinhole model).
+ *
+ *   diagPx      = sqrt(frameWidth² + frameHeight²)
+ *   tan(hFov/2) = (frameWidth / diagPx) × tan(diagFov/2)
+ *
+ * The camera streams in portrait orientation, so frameWidth is the shorter
+ * dimension. For a typical 9:16 portrait stream this yields ≈ 65° horizontal
+ * FOV; the vertical FOV (see cameraVFovDeg) is ≈ 97°.
+ */
+fun cameraHFovDeg(frameWidth: Int, frameHeight: Int): Float {
+    val diagPx   = sqrt(frameWidth.toDouble() * frameWidth + frameHeight.toDouble() * frameHeight)
+    val halfDiag = DIAGONAL_FOV_DEGREES.toDouble() / 2.0 * (Math.PI / 180.0)
+    val halfH    = atan(frameWidth / diagPx * tan(halfDiag))
+    return (halfH * 2.0 * (180.0 / Math.PI)).toFloat()
+}
+
 
 // ── Phase state machine ──────────────────────────────────────────────────────
 enum class PanoramaPhase {

@@ -69,6 +69,7 @@ class FlorenceProcessor : OnDeviceProcessor {
         private const val TAG = "FlorenceProcessor"
         private const val INFERENCE_TIMEOUT_MS = 60_000L
         private const val JPEG_QUALITY = 85
+        private const val MAX_ANALYZE_PX = 1024  // max dimension before downsampling for analyzeRegions()
         private val COLORS = intArrayOf(
             Color.rgb(255, 82,  82),  // red
             Color.rgb(0,   200, 83),  // green
@@ -380,6 +381,73 @@ class FlorenceProcessor : OnDeviceProcessor {
         val output = frame.copy(Bitmap.Config.ARGB_8888, true)
         Canvas(output).drawText(status, 20f, 60f, statusPaint)
         return output
+    }
+
+    /**
+     * Run Florence-2 dense region captioning on [bitmap] and return raw regions
+     * as (bbox-in-original-bitmap-px, label) pairs.
+     *
+     * The bitmap is downsampled to at most [MAX_ANALYZE_PX] on its longest side
+     * before encoding to keep the base64 payload small; returned bboxes are
+     * scaled back to the original bitmap's pixel space.
+     *
+     * Returns an empty list if the model isn't ready, another inference is already
+     * running, or the inference fails / times out.
+     */
+    suspend fun analyzeRegions(bitmap: Bitmap): List<Pair<RectF, String>> {
+        if (!modelReady.get()) return emptyList()
+        if (!isProcessing.compareAndSet(false, true)) return emptyList()
+
+        return withContext(Dispatchers.Default) {
+            try {
+                // Downsample to avoid sending a huge payload to the WebView.
+                val maxPx = MAX_ANALYZE_PX
+                val scaleFactor = if (bitmap.width > maxPx || bitmap.height > maxPx) {
+                    minOf(maxPx.toFloat() / bitmap.width, maxPx.toFloat() / bitmap.height)
+                } else 1f
+
+                val scaled = if (scaleFactor < 1f) {
+                    Bitmap.createScaledBitmap(
+                        bitmap,
+                        (bitmap.width  * scaleFactor).toInt().coerceAtLeast(1),
+                        (bitmap.height * scaleFactor).toInt().coerceAtLeast(1),
+                        true
+                    )
+                } else bitmap
+
+                val b64 = encodeFrame(scaled)
+                if (scaleFactor < 1f) scaled.recycle()
+
+                val deferred = CompletableDeferred<String?>()
+                pendingResult = deferred
+
+                withContext(Dispatchers.Main) {
+                    webView?.evaluateJavascript(
+                        "window.runInference('data:image/jpeg;base64,$b64')",
+                        null
+                    )
+                }
+
+                val json = withTimeoutOrNull(INFERENCE_TIMEOUT_MS) { deferred.await() }
+                if (json == null) return@withContext emptyList()
+
+                // Scale bboxes from downsampled-image space back to original bitmap space.
+                val scaleX = if (scaleFactor < 1f) 1f / scaleFactor else 1f
+                val scaleY = scaleX
+                parseResult(json).map { rc ->
+                    val bbox = if (scaleFactor < 1f) {
+                        RectF(rc.bbox.left * scaleX, rc.bbox.top * scaleY,
+                              rc.bbox.right * scaleX, rc.bbox.bottom * scaleY)
+                    } else rc.bbox
+                    bbox to rc.label
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "analyzeRegions() error: ${e.message}", e)
+                emptyList()
+            } finally {
+                isProcessing.set(false)
+            }
+        }
     }
 
     // ── Data ──────────────────────────────────────────────────────────────────

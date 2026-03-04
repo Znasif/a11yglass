@@ -42,6 +42,10 @@ object OnDeviceProcessorManager {
         processors[panoramaProcessor.id] = panoramaProcessor
         processors[florenceProcessor.id] = florenceProcessor
 
+        // Give PanoramaProcessor a reference to Florence so it can run scene
+        // analysis on the stitched panorama after Phase 2 completes.
+        panoramaProcessor.setFlorenceProcessor(florenceProcessor)
+
         for (processor in processors.values) {
             try {
                 processor.initialize(context)

@@ -141,8 +141,9 @@ class StripRenderer {
         drawGapMarkers(canvas, frameWidth, stripTop, currentAngleDeg, keyframes)
 
         // 6. FOV rectangle
-        val fovLeft  = sx(currentAngleDeg - CAMERA_FOV_DEGREES / 2f, frameWidth, currentAngleDeg)
-        val fovRight = sx(currentAngleDeg + CAMERA_FOV_DEGREES / 2f, frameWidth, currentAngleDeg)
+        val hFov     = cameraHFovDeg(frameWidth, frameHeight)
+        val fovLeft  = sx(currentAngleDeg - hFov / 2f, frameWidth, currentAngleDeg)
+        val fovRight = sx(currentAngleDeg + hFov / 2f, frameWidth, currentAngleDeg)
         canvas.drawRect(fovLeft, stripTop, fovRight, fH, fovFillPaint)
         canvas.drawRect(fovLeft, stripTop, fovRight, fH, fovBorderPaint)
 

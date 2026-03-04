@@ -65,11 +65,12 @@ class PanoramaLocalizer {
         val H = featureTracker.computeHomography(liveFrame) ?: return null
 
         val shiftPx    = extractHorizontalShift(H, liveFrame.width, liveFrame.height)
-        val shiftDeg   = shiftPx / liveFrame.width * CAMERA_FOV_DEGREES
+        val hFov = cameraHFovDeg(liveFrame.width, liveFrame.height)
+        val shiftDeg   = shiftPx / liveFrame.width * hFov
         val estimatedAngle = referenceAngleDeg + shiftDeg
 
         // Re-anchor when we've drifted far enough that a closer keyframe exists
-        if (abs(estimatedAngle - referenceAngleDeg) > CAMERA_FOV_DEGREES * 0.6f) {
+        if (abs(estimatedAngle - referenceAngleDeg) > hFov * 0.6f) {
             val newIdx = keyframes.indices
                 .minByOrNull { abs(keyframes[it].angleDeg - estimatedAngle) }!!
             if (newIdx != currentKeyframeIdx) {
