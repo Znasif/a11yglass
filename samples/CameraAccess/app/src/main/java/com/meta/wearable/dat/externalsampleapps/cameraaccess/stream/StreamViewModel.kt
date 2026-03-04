@@ -57,6 +57,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -104,6 +105,7 @@ class StreamViewModel(
     private var serverResponseJob: Job? = null
     private var frameStreamingJob: Job? = null
     private var localProcessingJob: Job? = null
+    private var hierarchyReadyJob: Job? = null
 
     // Frame streaming state
     // Use SharedFlow with replay=1 and DROP_OLDEST to ensure we always have the latest frame available
@@ -222,6 +224,8 @@ class StreamViewModel(
         frameStreamingJob = null
         localProcessingJob?.cancel()
         localProcessingJob = null
+        hierarchyReadyJob?.cancel()
+        hierarchyReadyJob = null
 
         streamSession?.close()
         streamSession = null
@@ -316,14 +320,16 @@ class StreamViewModel(
             }
         }
 
-        // Panorama-specific: when process() signals "Done: N frames", tear down the job
-        // without calling stopServerStreaming() so processedFrame (the stitch) is preserved.
+        // Panorama-specific: when process() signals stitch complete, tear down the job
+        // without calling stopServerStreaming() so processedFrame (the stitch) is preserved,
+        // then start watching for hierarchy completion to activate the Explore button.
         if (result.text?.startsWith("Panorama complete") == true) {
             val processorId = wearablesViewModel.uiState.value.selectedProcessorId
             if (OnDeviceProcessorManager.getProcessor(processorId) is
                 com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
             ) {
                 finishPanoramaCapture()
+                startHierarchyWatcher()
             }
         }
     }
@@ -331,18 +337,95 @@ class StreamViewModel(
     /**
      * Terminates the local processing job after a panorama sweep completes.
      * Does NOT clear processedFrame — the stitched panorama stays visible.
+     * Pauses video capture so the camera is not running while the user is
+     * reviewing the static panorama.
      */
     private fun finishPanoramaCapture() {
         localProcessingJob?.cancel()
         localProcessingJob = null
+        pauseVideoCapture()
         _uiState.update { current ->
             current.copy(
                 isStreamingToServer = false,
-                statusMessage = "Panorama ready — tap camera button to restart",
-                captureButtonMode = CaptureButtonMode.PANORAMA_DONE,
+                statusMessage = "Panorama ready — building scene map…",
+                captureButtonMode = CaptureButtonMode.PANORAMA_ANALYZING,
             )
         }
-        Log.d(TAG, "Panorama capture finished — stitch preserved in processedFrame")
+        Log.d(TAG, "Panorama capture finished — stitch preserved, camera paused")
+    }
+
+    /**
+     * Pause the video feed by cancelling the frame-collection job.
+     * The StreamSession remains open; [resumeVideoCapture] restarts collection.
+     */
+    private fun pauseVideoCapture() {
+        videoJob?.cancel()
+        videoJob = null
+        Log.d(TAG, "Video capture paused")
+    }
+
+    /**
+     * Resume video collection from the existing StreamSession.
+     * No-op if already running or no session is open.
+     */
+    private fun resumeVideoCapture() {
+        if (videoJob != null) return
+        val session = streamSession ?: return
+        videoJob = viewModelScope.launch {
+            session.videoStream.collect { handleVideoFrame(it) }
+        }
+        Log.d(TAG, "Video capture resumed")
+    }
+
+    /**
+     * Watch [PanoramaProcessor.hierarchyReady] and drive TTS progress updates until
+     * the hierarchy finishes, then promote the capture button to [CaptureButtonMode.PANORAMA_DONE].
+     *
+     * Called immediately after [finishPanoramaCapture] when stitching completes.
+     * The watcher polls every second so the elapsed-time messages stay accurate.
+     */
+    private fun startHierarchyWatcher() {
+        val processorId = wearablesViewModel.uiState.value.selectedProcessorId
+        val pp = OnDeviceProcessorManager.getProcessor(processorId)
+            as? com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
+            ?: return
+
+        hierarchyReadyJob?.cancel()
+        hierarchyReadyJob = viewModelScope.launch {
+            val startMs = System.currentTimeMillis()
+            var lastAnnounceMs = startMs
+            var firstAnnounced = false
+
+            while (!pp.hierarchyReady.value) {
+                val now = System.currentTimeMillis()
+                when {
+                    !firstAnnounced -> {
+                        firstAnnounced = true
+                        lastAnnounceMs = now
+                        announceText("Analyzing scene…")
+                    }
+                    now - lastAnnounceMs > 10_000L -> {
+                        lastAnnounceMs = now
+                        val secs = (now - startMs) / 1000
+                        announceText("Still analyzing… ${secs}s elapsed")
+                    }
+                }
+                delay(1_000L)
+            }
+
+            // Hierarchy is ready — activate the Explore button.
+            val n = pp.hierarchyNodeCount
+            _uiState.update { it.copy(captureButtonMode = CaptureButtonMode.PANORAMA_DONE) }
+            announceText("Panorama ready — $n region${if (n == 1) "" else "s"} found")
+            Log.d(TAG, "Hierarchy watcher done — $n nodes, button promoted to PANORAMA_DONE")
+        }
+    }
+
+    /** Update responseText, forward to server repository, and optionally speak via TTS. */
+    private fun announceText(text: String) {
+        _uiState.update { it.copy(responseText = text) }
+        wearablesViewModel.updateServerResponseText(text)
+        if (!_uiState.value.isAudioMuted) ttsManager.speak(text)
     }
 
     /**
@@ -655,12 +738,17 @@ class StreamViewModel(
                     Log.d(TAG, "Panorama: exiting Reality Proxy")
                     processor.exitRealityProxy()
                     finishPanoramaCapture()   // cancels localProcessingJob, preserves processedFrame
-                    _uiState.update { it.copy(statusMessage = "Panorama ready — tap camera to enter proxy mode") }
+                    // Hierarchy was already built before entering RP — restore DONE state directly.
+                    _uiState.update { it.copy(
+                        captureButtonMode = CaptureButtonMode.PANORAMA_DONE,
+                        statusMessage = "Panorama ready — tap camera to enter proxy mode",
+                    ) }
                 }
 
                 processor.hasStitchedResult -> {
                     // ── Enter Reality Proxy ──────────────────────────────────
                     Log.d(TAG, "Panorama: entering Reality Proxy")
+                    resumeVideoCapture()   // restart camera feed (was paused after stitch)
                     if (!_uiState.value.isStreamingToServer) startServerStreaming()
                     processor.enterRealityProxy()
                     _uiState.update { it.copy(
@@ -672,6 +760,8 @@ class StreamViewModel(
                 else -> {
                     // ── Start new sweep ──────────────────────────────────────
                     Log.d(TAG, "Panorama: starting sweep")
+                    hierarchyReadyJob?.cancel()
+                    hierarchyReadyJob = null
                     // Clear the previous stitch from processedFrame BEFORE state.reset() runs,
                     // then hint GC to release the potentially 200+ MB stitch bitmap before
                     // the new session starts allocating keyframe copies.

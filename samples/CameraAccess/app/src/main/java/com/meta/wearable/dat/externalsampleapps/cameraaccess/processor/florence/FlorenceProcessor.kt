@@ -135,7 +135,8 @@ class FlorenceProcessor : OnDeviceProcessor {
     @JavascriptInterface
     fun onInferenceResult(json: String) {
         pendingResult?.complete(json)
-        Log.d(TAG, "Inference result received (${json.length} chars)")
+        // Log the full result up to 500 chars so we can see if bboxes/labels are actually populated.
+        Log.d(TAG, "Inference result (${json.length} chars): ${json.take(500)}")
     }
 
     @JavascriptInterface
@@ -239,7 +240,10 @@ class FlorenceProcessor : OnDeviceProcessor {
 
         return withContext(Dispatchers.Default) {
             try {
+                Log.d(TAG, "process(): frame ${frame.width}×${frame.height}")
                 val b64 = encodeFrame(frame)
+                // JPEG magic bytes FFD8FF → base64 prefix "/9j/" — verify encoding is correct.
+                Log.d(TAG, "process(): encoded ${b64.length} base64 chars  prefix='${b64.take(8)}'  suffix='${b64.takeLast(4)}'  — calling runInference")
                 val deferred = CompletableDeferred<String?>()
                 pendingResult = deferred
 
@@ -254,6 +258,7 @@ class FlorenceProcessor : OnDeviceProcessor {
                 val json = withTimeoutOrNull(INFERENCE_TIMEOUT_MS) { deferred.await() }
 
                 if (json == null) {
+                    Log.w(TAG, "process(): inference timed out after ${INFERENCE_TIMEOUT_MS / 1000}s")
                     return@withContext OnDeviceProcessorResult(
                         processedImage = stampStatus(frame, "Florence: inference timed out"),
                         text           = "Timeout after ${INFERENCE_TIMEOUT_MS / 1000}s",
@@ -262,6 +267,7 @@ class FlorenceProcessor : OnDeviceProcessor {
                 }
 
                 val regions = parseResult(json)
+                Log.d(TAG, "process(): ${regions.size} region(s) in ${System.currentTimeMillis() - t0}ms")
                 val annotated = drawRegions(frame, regions)
                 val summary = regions.joinToString(", ") { it.label.take(25) }
                     .ifEmpty { "No regions detected" }
@@ -400,6 +406,7 @@ class FlorenceProcessor : OnDeviceProcessor {
 
         return withContext(Dispatchers.Default) {
             try {
+                Log.d(TAG, "analyzeRegions(): input ${bitmap.width}×${bitmap.height}")
                 // Downsample to avoid sending a huge payload to the WebView.
                 val maxPx = MAX_ANALYZE_PX
                 val scaleFactor = if (bitmap.width > maxPx || bitmap.height > maxPx) {
@@ -415,7 +422,11 @@ class FlorenceProcessor : OnDeviceProcessor {
                     )
                 } else bitmap
 
+                if (scaleFactor < 1f) {
+                    Log.d(TAG, "analyzeRegions(): downsampled to ${scaled.width}×${scaled.height} (scale=${"%.3f".format(scaleFactor)})")
+                }
                 val b64 = encodeFrame(scaled)
+                Log.d(TAG, "analyzeRegions(): encoded ${b64.length} base64 chars — calling runInference")
                 if (scaleFactor < 1f) scaled.recycle()
 
                 val deferred = CompletableDeferred<String?>()
@@ -429,12 +440,17 @@ class FlorenceProcessor : OnDeviceProcessor {
                 }
 
                 val json = withTimeoutOrNull(INFERENCE_TIMEOUT_MS) { deferred.await() }
-                if (json == null) return@withContext emptyList()
+                if (json == null) {
+                    Log.w(TAG, "analyzeRegions(): inference timed out after ${INFERENCE_TIMEOUT_MS / 1000}s")
+                    return@withContext emptyList()
+                }
 
                 // Scale bboxes from downsampled-image space back to original bitmap space.
                 val scaleX = if (scaleFactor < 1f) 1f / scaleFactor else 1f
                 val scaleY = scaleX
-                parseResult(json).map { rc ->
+                val captions = parseResult(json)
+                Log.d(TAG, "analyzeRegions(): ${captions.size} region(s) parsed")
+                captions.map { rc ->
                     val bbox = if (scaleFactor < 1f) {
                         RectF(rc.bbox.left * scaleX, rc.bbox.top * scaleY,
                               rc.bbox.right * scaleX, rc.bbox.bottom * scaleY)
@@ -487,7 +503,6 @@ class FlorenceProcessor : OnDeviceProcessor {
                         try {
                             val client = serverSocket.accept()
                             val id = ++connId
-                            Log.d(TAG, "AssetServer: accepted conn #$id from ${client.remoteSocketAddress}")
                             Thread { serve(client, id) }.start()
                         } catch (e: Exception) {
                             if (!serverSocket.isClosed)
@@ -507,7 +522,6 @@ class FlorenceProcessor : OnDeviceProcessor {
                         InputStreamReader(it.getInputStream(), Charsets.ISO_8859_1)
                     )
                     val requestLine = reader.readLine()
-                    Log.d(TAG, "AssetServer #$connId: requestLine='$requestLine'")
                     if (requestLine == null) {
                         Log.w(TAG, "AssetServer #$connId: null request line — client closed without sending")
                         return
@@ -522,10 +536,7 @@ class FlorenceProcessor : OnDeviceProcessor {
                         .replace("models/florence/onnx/", "models/florence/")
 
                     // Drain HTTP request headers (stop at the blank line).
-                    var headerLine: String?
-                    while (reader.readLine().also { line -> headerLine = line }?.isNotEmpty() == true) {
-                        Log.d(TAG, "AssetServer #$connId: header: $headerLine")
-                    }
+                    while (reader.readLine()?.isNotEmpty() == true) { /* consume */ }
 
                     Log.d(TAG, "AssetServer #$connId: $method '$rawPath'")
 
@@ -545,7 +556,6 @@ class FlorenceProcessor : OnDeviceProcessor {
                         serveAsset(rawPath, sendBody, out, connId)
                     }
                     out.flush()
-                    Log.d(TAG, "AssetServer #$connId: done")
                 } catch (e: Exception) {
                     Log.e(TAG, "AssetServer #$connId: serve error: ${e.message}", e)
                 }

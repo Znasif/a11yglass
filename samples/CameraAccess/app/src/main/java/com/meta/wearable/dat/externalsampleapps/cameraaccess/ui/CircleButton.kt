@@ -78,6 +78,8 @@ fun CaptureButton(
             Triple(Icons.Filled.PhotoCamera, Color.White, Color.Black)
         CaptureButtonMode.RECORDING ->
             Triple(Icons.Filled.Stop, AppColor.Red, Color.White)
+        CaptureButtonMode.PANORAMA_ANALYZING ->
+            Triple(Icons.Filled.Explore, Color.Gray, Color.White)
         CaptureButtonMode.PANORAMA_DONE ->
             Triple(Icons.Filled.Explore, AppColor.DeepBlue, Color.White)
         CaptureButtonMode.PROXY_ACTIVE ->
@@ -86,7 +88,12 @@ fun CaptureButton(
     Button(
         modifier = Modifier.aspectRatio(1f),
         onClick = onClick,
-        colors = ButtonDefaults.buttonColors(containerColor = containerColor),
+        enabled = mode != CaptureButtonMode.PANORAMA_ANALYZING,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = containerColor,
+            disabledContainerColor = Color.Gray.copy(alpha = 0.4f),
+            disabledContentColor = Color.White.copy(alpha = 0.5f),
+        ),
         shape = CircleShape,
         contentPadding = PaddingValues(0.dp),
     ) {

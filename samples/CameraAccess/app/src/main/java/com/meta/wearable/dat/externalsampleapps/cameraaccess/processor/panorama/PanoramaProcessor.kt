@@ -16,6 +16,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -86,6 +89,12 @@ class PanoramaProcessor : OnDeviceProcessor {
     // Long-lived scope for hierarchy building — survives localProcessingJob cancellation.
     private val processorScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    // ── Hierarchy-ready signal ────────────────────────────────────────────────
+    // Emits true once Florence / fallback hierarchy completes after stitching.
+    // StreamViewModel collects this to activate the Explore button.
+    private val _hierarchyReady = MutableStateFlow(false)
+    val hierarchyReady: StateFlow<Boolean> = _hierarchyReady.asStateFlow()
+
     // ── Concurrency guards ───────────────────────────────────────────────────
     private val isProcessing = AtomicBoolean(false)
     @Volatile private var startRequested         = false
@@ -103,9 +112,10 @@ class PanoramaProcessor : OnDeviceProcessor {
     private var lastAnnouncedNodeLabel: String? = null
 
     // ── Public state ─────────────────────────────────────────────────────────
-    val isCapturing: Boolean      get() = state.isCapturing
-    val phase: PanoramaPhase      get() = state.phase
-    val hasStitchedResult: Boolean get() = state.stitchedResult != null
+    val isCapturing: Boolean       get() = state.isCapturing
+    val phase: PanoramaPhase       get() = state.phase
+    val hasStitchedResult: Boolean  get() = state.stitchedResult != null
+    val hierarchyNodeCount: Int     get() = state.hierarchyNodes.size
 
     // ── Overlay paint ────────────────────────────────────────────────────────
     private val statusPaint = Paint().apply {
@@ -142,13 +152,15 @@ class PanoramaProcessor : OnDeviceProcessor {
                 // ── ① Handle start request ───────────────────────────────────
                 if (startRequested) {
                     startRequested = false
+                    realityProxyRequested = false
+                    exitProxyRequested    = false
+                    _hierarchyReady.value = false
                     state.reset()
                     state.phase = PanoramaPhase.CAPTURING
                     lastSpokenMilestoneDeg = 0f
                     consecutiveStillFrames = 0
                     lastGuidanceMs = 0L
                     lastAnnouncedNodeLabel = null
-
                     featureTracker?.setReferenceFrame(frame, emptyList())
                     state.lastAcceptedFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
                     captureKeyframe(frame, 0f, 0f, IDENTITY_H.copyOf())
@@ -206,7 +218,8 @@ class PanoramaProcessor : OnDeviceProcessor {
                             }
                             hierarchyBuilder.setNodes(nodes)
                             state.hierarchyNodes = nodes
-                            Log.d(TAG, "Hierarchy ready: ${nodes.size} nodes")
+                            _hierarchyReady.value = true
+                            Log.d(TAG, "Hierarchy ready: ${nodes.size} nodes — signalling ViewModel")
                         }
                     }
 
@@ -225,7 +238,8 @@ class PanoramaProcessor : OnDeviceProcessor {
                     state.phase = PanoramaPhase.REALITY_PROXY
                     lastAnnouncedNodeLabel = null
                     localizer?.initialize(state.keyframes, featureTracker!!)
-                    Log.d(TAG, "Entered Reality Proxy mode")
+                    Log.d(TAG, "Entered Reality Proxy mode — ${state.hierarchyNodes.size} nodes, " +
+                        "${state.keyframes.size} keyframes")
 
                     return@withContext OnDeviceProcessorResult(
                         processedImage = renderRealityProxy(frame),
@@ -251,14 +265,14 @@ class PanoramaProcessor : OnDeviceProcessor {
 
                 // ── ⑤ Idle with completed stitch: keep returning frozen result ─
                 // Excludes REALITY_PROXY (which has its own live loop below).
+                // TTS progress updates are driven by StreamViewModel.startHierarchyWatcher().
                 if (!state.isCapturing
                     && state.stitchedResult != null
                     && state.phase != PanoramaPhase.REALITY_PROXY
                 ) {
-                    val statusText = if (state.hierarchyNodes.isEmpty()) "Building scene map…" else null
                     return@withContext OnDeviceProcessorResult(
                         processedImage = state.stitchedResult,
-                        text = statusText,
+                        text = null,
                         processingTimeMs = System.currentTimeMillis() - t0
                     )
                 }
@@ -390,22 +404,19 @@ class PanoramaProcessor : OnDeviceProcessor {
     /**
      * Enter Reality Proxy mode.
      *
-     * No-op if no stitched result exists, or if scene analysis (Florence or
-     * fallback hierarchy build) has not yet completed. The UI shows
-     * "Building scene map…" while waiting; the user can try again once that
-     * message disappears.
+     * Allowed as soon as stitching is complete, even while Florence scene
+     * analysis is still running in the background. Hierarchy nodes will
+     * populate progressively; the live cutout and panorama are available
+     * immediately. No-op if there is no stitched result yet.
      */
     fun enterRealityProxy() {
-        when {
-            state.stitchedResult == null ->
-                Log.d(TAG, "enterRealityProxy() ignored — no stitched result yet")
-            state.hierarchyNodes.isEmpty() ->
-                Log.d(TAG, "enterRealityProxy() blocked — scene analysis still running")
-            else -> {
-                realityProxyRequested = true
-                Log.d(TAG, "enterRealityProxy() requested")
-            }
+        if (state.stitchedResult == null) {
+            Log.d(TAG, "enterRealityProxy() ignored — no stitched result yet")
+            return
         }
+        realityProxyRequested = true
+        val nodeCount = state.hierarchyNodes.size
+        Log.d(TAG, "enterRealityProxy() requested — $nodeCount nodes available so far")
     }
 
     /** Exit Reality Proxy mode and return to frozen panorama display. */

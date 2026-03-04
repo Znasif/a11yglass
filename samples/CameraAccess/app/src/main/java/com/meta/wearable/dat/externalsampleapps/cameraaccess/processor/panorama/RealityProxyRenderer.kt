@@ -215,11 +215,10 @@ class RealityProxyRenderer {
                 else -> "${focusedNode.angleDeg.toInt()}° — tap to describe (coming soon)"
             }
             canvas.drawText(desc, 24f, panelTop + 96f, detailDescPaint)
+        } else if (nodes.isEmpty()) {
+            canvas.drawText("Identifying regions…", 24f, panelTop + 64f, detailDescPaint)
         } else {
-            canvas.drawText(
-                "Look at a region to see details",
-                24f, panelTop + 64f, detailDescPaint
-            )
+            canvas.drawText("Look at a region to see details", 24f, panelTop + 64f, detailDescPaint)
         }
 
         return output

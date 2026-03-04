@@ -165,33 +165,62 @@
     }
     try {
       const image       = await RawImage.fromURL(imageDataUrl);
+      // Log image dimensions so we can verify the frame arrived correctly and
+      // confirm what size post_process_generation will receive.
+      AndroidBridge.onModelProgress('Image loaded: ' + image.width + '×' + image.height
+        + '  size=' + JSON.stringify(image.size));
+
       const prompt      = processor.construct_prompts(TASK);
       const textInputs  = tokenizer(prompt, { padding: true, truncation: true });
       const visionInputs = await processor(image);
+      AndroidBridge.onModelProgress('Inputs ready — calling model.generate…');
 
       const generatedIds = await model.generate({
         ...textInputs,
         ...visionInputs,
         max_new_tokens: 1024,
-        num_beams: 1,       // greedy — 3x faster than default beam=3
+        num_beams: 3,       // beam=3 matches Florence-2 reference; greedy (1) can miss loc tokens
         do_sample: false,
       });
+
+      // Report raw token count before decoding — if this is tiny (≤ prompt length),
+      // the model output EOS immediately (quantisation / device issue).
+      const seqLen = generatedIds[0]
+        ? generatedIds[0].length
+        : (generatedIds.dims ? generatedIds.dims[generatedIds.dims.length - 1] : '?');
+      AndroidBridge.onModelProgress('Generated ' + seqLen + ' token(s)');
 
       const generatedText = tokenizer.batch_decode(generatedIds, {
         skip_special_tokens: false,
       })[0];
 
+      // Show the first 300 chars of raw generated text so we can see whether
+      // <loc_N> tokens are present or the model produced nothing after the prompt.
+      AndroidBridge.onModelProgress('GeneratedText (' + generatedText.length + ' chars): '
+        + generatedText.slice(0, 300));
+
       // post_process_generation converts <loc_N> tokens to pixel coords
       // scaled to the original image dimensions (image.size = [w, h]).
-      const result = processor.post_process_generation(
-        generatedText,
-        TASK,
-        image.size,
-      );
+      let result;
+      try {
+        result = processor.post_process_generation(
+          generatedText,
+          TASK,
+          image.size,
+        );
+      } catch (ppErr) {
+        AndroidBridge.onModelProgress('post_process_generation FAILED: ' + ppErr.message);
+        throw ppErr;
+      }
+
+      const taskResult = result[TASK];
+      const regionCount = taskResult ? taskResult.bboxes.length : 0;
+      AndroidBridge.onModelProgress('Regions after post-process: ' + regionCount);
 
       AndroidBridge.onInferenceResult(JSON.stringify(result));
     } catch (e) {
-      AndroidBridge.onError('Inference failed: ' + e.message);
+      AndroidBridge.onError('Inference failed: ' + e.message
+        + ' || ' + (e.stack || '').slice(0, 400));
     }
   };
 

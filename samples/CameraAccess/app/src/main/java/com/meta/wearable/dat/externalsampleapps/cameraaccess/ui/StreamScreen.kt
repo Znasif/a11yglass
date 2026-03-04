@@ -107,13 +107,14 @@ fun StreamScreenContent(
     modifier: Modifier = Modifier
 ) {
     // Zoomable state for the panorama result viewer. Declared unconditionally per
-    // Compose rules; only wired up when captureButtonMode == PANORAMA_DONE.
+    // Compose rules; only wired up when captureButtonMode == PANORAMA_DONE / ANALYZING.
     val panoramaZoomState = rememberZoomableState()
 
     Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
         // Video frame display (prefer processed frame if streaming to server)
         streamUiState.displayFrame?.let { frame ->
             when (streamUiState.captureButtonMode) {
+                CaptureButtonMode.PANORAMA_ANALYZING,
                 CaptureButtonMode.PANORAMA_DONE -> {
                     // Stitched panorama: full pan/pinch-zoom viewer
                     Image(

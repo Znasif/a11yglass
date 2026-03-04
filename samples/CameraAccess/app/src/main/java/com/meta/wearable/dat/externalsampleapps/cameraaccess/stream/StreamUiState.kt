@@ -16,10 +16,11 @@ import android.graphics.Bitmap
 import com.meta.wearable.dat.camera.types.StreamSessionState
 
 enum class CaptureButtonMode {
-    CAMERA,        // Default: start sweep / photo capture
-    RECORDING,     // Panorama sweep in progress — shows Stop
-    PANORAMA_DONE, // Stitched panorama ready — press to enter Reality Proxy
-    PROXY_ACTIVE,  // In Reality Proxy mode — press to exit
+    CAMERA,              // Default: start sweep / photo capture
+    RECORDING,           // Panorama sweep in progress — shows Stop
+    PANORAMA_ANALYZING,  // Stitched; hierarchy building — Explore button disabled
+    PANORAMA_DONE,       // Hierarchy ready — Explore button enabled
+    PROXY_ACTIVE,        // In Reality Proxy mode — press to exit
 }
 
 data class StreamUiState(
