@@ -54,6 +54,7 @@
     AutoTokenizer,
     RawImage,
     env,
+    full,
   } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/dist/transformers.min.js';
 
   // Point Transformers.js at our loopback asset server.
@@ -102,55 +103,79 @@
       }
 
       // ── Load vision model ─────────────────────────────────────────────────
+      // Dtypes match exactly what onnx-community/Florence-2-base-ft downloads
+      // in the HuggingFace WebGPU demo on Android Edge (confirmed from network log).
       const dtype = {
-        embed_tokens: 'q8',           // → embed_tokens_quantized.onnx
-        encoder_model: 'q8',          // → encoder_model_quantized.onnx
-        vision_encoder: 'q8',         // → vision_encoder_quantized.onnx
-        decoder_model_merged: 'q8',   // → decoder_model_merged_quantized.onnx
+        embed_tokens:        'fp16',  // → embed_tokens_fp16.onnx
+        vision_encoder:      'fp16',  // → vision_encoder_fp16.onnx
+        encoder_model:       'q4',    // → encoder_model_q4.onnx
+        decoder_model_merged:'q4',    // → decoder_model_merged_q4.onnx
       };
 
-      // Try WebGPU first, fall back to WASM.
+      AndroidBridge.onModelProgress('Loading vision model (WebGPU)…');
       try {
-        if (!navigator.gpu) throw new Error('WebGPU not available');
-        AndroidBridge.onModelProgress('Loading vision model (WebGPU)…');
         model = await Florence2ForConditionalGeneration.from_pretrained(MODEL_NAME, {
           dtype,
           device: 'webgpu',
           local_files_only: true,
         });
         AndroidBridge.onModelProgress('Vision model: WebGPU OK');
-      } catch (gpuErr) {
-        AndroidBridge.onModelProgress('WebGPU unavailable (' + gpuErr.message + ') — using WASM…');
-        try {
-          model = await Florence2ForConditionalGeneration.from_pretrained(MODEL_NAME, {
-            dtype,
-            device: 'wasm',
-            local_files_only: true,
-          });
-          AndroidBridge.onModelProgress('Vision model: WASM OK');
-        } catch (e) {
-          AndroidBridge.onModelProgress('Vision model FAIL: ' + e.message + ' || ' + (e.stack || '').slice(0, 300));
-          throw e;
-        }
+      } catch (e) {
+        AndroidBridge.onModelProgress('Vision model FAIL: ' + e.message + ' || ' + (e.stack || '').slice(0, 300));
+        throw e;
       }
 
-      // ── Warm-up pass ──────────────────────────────────────────────────────
+      // ── Warm-up pass (matches reference implementation exactly) ───────────
       AndroidBridge.onModelProgress('Warming up…');
-      const dummyImage  = new RawImage(new Uint8ClampedArray(3), 1, 1, 3);
-      const dummyPrompt = processor.construct_prompts(TASK);
-      const dummyText   = tokenizer(dummyPrompt, { padding: true, truncation: true });
-      const dummyVision = await processor(dummyImage);
+      const dummyText   = tokenizer('a');
+      const dummyVision = full([1, 3, 768, 768], 0.0);
       await model.generate({
         ...dummyText,
-        ...dummyVision,
+        pixel_values: dummyVision,
         max_new_tokens: 1,
-        num_beams: 1,
-        do_sample: false,
       });
 
       AndroidBridge.onModelReady();
+      // Fire-and-forget: run <CAPTION> on the known-good beetle.png so we can
+      // verify the whole pipeline works before touching any live camera frame.
+      runSanityCheck();
     } catch (e) {
       AndroidBridge.onError('Init failed: ' + e.message);
+    }
+  }
+
+  async function runSanityCheck() {
+    try {
+      AndroidBridge.onModelProgress('Sanity: fetching beetle.png…');
+      const resp = await fetch(env.localModelPath + 'florence/beetle.png');
+      const blob = await resp.blob();
+      const dataUrl = await new Promise(res => {
+        const reader = new FileReader();
+        reader.onload = () => res(reader.result);
+        reader.readAsDataURL(blob);
+      });
+
+      const image = await RawImage.fromURL(dataUrl);
+      AndroidBridge.onModelProgress('Sanity: image ' + image.width + '×' + image.height);
+
+      const prompt  = processor.construct_prompts('<CAPTION>');
+      const textInputs   = tokenizer(prompt, { padding: true, truncation: true });
+      const visionInputs = await processor(image);
+
+      const generatedIds = await model.generate({
+        ...textInputs,
+        ...visionInputs,
+        max_new_tokens: 256,
+        num_beams: 3,
+        do_sample: false,
+      });
+
+      const generatedText = tokenizer.batch_decode(generatedIds, { skip_special_tokens: false })[0];
+      AndroidBridge.onModelProgress('Sanity raw text (' + generatedText.length + ' chars): ' + generatedText.slice(0, 200));
+      const result = processor.post_process_generation(generatedText, '<CAPTION>', image.size);
+      AndroidBridge.onModelProgress('Sanity result: ' + JSON.stringify(result));
+    } catch (e) {
+      AndroidBridge.onModelProgress('Sanity FAILED: ' + e.message + ' || ' + (e.stack || '').slice(0, 200));
     }
   }
 
