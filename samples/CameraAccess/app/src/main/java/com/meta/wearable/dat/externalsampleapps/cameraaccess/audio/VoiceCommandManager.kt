@@ -40,9 +40,11 @@ class VoiceCommandManager(private val context: Context) : RecognitionListener {
     sealed class VoiceCommand {
         data class StartProcessor(val processorId: Int, val processorName: String) : VoiceCommand()
         object StopProcessing : VoiceCommand()
-        object TakePhoto : VoiceCommand()  // For VizLens: triggers OCR re-scan
-        object Track : VoiceCommand()       // For VideoSegmentation: triggers object tracking
-        object StopTracking : VoiceCommand() // For VideoSegmentation: stops tracking
+        object TakePhoto : VoiceCommand()           // VizLens: OCR re-scan
+        object Track : VoiceCommand()               // VideoSegmentation: start tracking
+        object StopTracking : VoiceCommand()        // VideoSegmentation: stop tracking
+        object StartPanoramaCapture : VoiceCommand() // Panorama: begin sweep
+        object StopPanoramaCapture : VoiceCommand()  // Panorama: end sweep / trigger stitch
     }
 
     private var speechRecognizer: SpeechRecognizer? = null
@@ -218,6 +220,31 @@ class VoiceCommandManager(private val context: Context) : RecognitionListener {
                     }
                     return
                 }
+            }
+        }
+
+        // Look for panorama sweep control — checked before generic "stop" to avoid early match
+        val stopSweepKeywords = listOf("stop sweep", "stop panorama", "finish sweep", "done sweeping", "done")
+        for (keyword in stopSweepKeywords) {
+            val keywordIndex = text.lastIndexOf(keyword)
+            if (keywordIndex >= 0 && text.length - keywordIndex < 25) {
+                Log.d(TAG, "Detected command: $keyword (stop panorama capture)")
+                transcriptBuffer.clear()
+                _transcript.value = ""
+                scope.launch { onCommandDetected?.invoke(VoiceCommand.StopPanoramaCapture) }
+                return
+            }
+        }
+
+        val startSweepKeywords = listOf("start sweep", "begin sweep", "sweep", "begin panorama")
+        for (keyword in startSweepKeywords) {
+            val keywordIndex = text.lastIndexOf(keyword)
+            if (keywordIndex >= 0 && text.length - keywordIndex < 25) {
+                Log.d(TAG, "Detected command: $keyword (start panorama capture)")
+                transcriptBuffer.clear()
+                _transcript.value = ""
+                scope.launch { onCommandDetected?.invoke(VoiceCommand.StartPanoramaCapture) }
+                return
             }
         }
 

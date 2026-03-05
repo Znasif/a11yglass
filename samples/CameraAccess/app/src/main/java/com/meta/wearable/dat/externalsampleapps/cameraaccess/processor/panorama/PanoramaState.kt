@@ -6,6 +6,18 @@ import kotlin.math.atan
 import kotlin.math.sqrt
 import kotlin.math.tan
 
+// ── Shared color palette (used by both annotated-stitch view and Reality Proxy) ──────────────
+val NODE_COLORS = intArrayOf(
+    android.graphics.Color.rgb(255, 82,  82),   // red
+    android.graphics.Color.rgb(0,   200, 83),   // green
+    android.graphics.Color.rgb(41,  182, 246),  // blue
+    android.graphics.Color.rgb(255, 193, 7),    // amber
+    android.graphics.Color.rgb(171, 71,  188),  // purple
+    android.graphics.Color.rgb(0,   188, 212),  // cyan
+    android.graphics.Color.rgb(255, 138, 101),  // orange
+    android.graphics.Color.rgb(105, 240, 174),  // mint
+)
+
 // ── Thresholds ──────────────────────────────────────────────────────────────
 // At ~0.17fps (5-9s per ONNX inference), a comfortable 5°/s pan accumulates
 // 25-45° between measurements. MIN/MAX are calibrated accordingly.

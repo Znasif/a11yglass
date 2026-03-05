@@ -177,9 +177,20 @@ class StreamViewModel(
             var lastProcessorId = -1
             wearablesViewModel.uiState.collect { state ->
                 if (lastProcessorId != -1 && state.selectedProcessorId != lastProcessorId) {
-                    // Processor changed - clear old frame, TTS will naturally update with new responses
-                    _uiState.update { it.copy(processedFrame = null, responseText = "") }
-                    Log.d(TAG, "Processor changed from $lastProcessorId to ${state.selectedProcessorId}, cleared old frame")
+                    // Cancel any in-flight panorama hierarchy job so it can't mutate UI
+                    // state (e.g. call buildAnnotatedPanorama on a recycled bitmap) after
+                    // the user switches away.
+                    hierarchyReadyJob?.cancel()
+                    hierarchyReadyJob = null
+                    // Reset UI to a clean baseline for the incoming processor.
+                    _uiState.update { it.copy(
+                        processedFrame     = null,
+                        responseText       = "",
+                        captureButtonMode  = CaptureButtonMode.CAMERA,
+                        isStreamingToServer = false,
+                        statusMessage      = "",
+                    ) }
+                    Log.d(TAG, "Processor changed from $lastProcessorId to ${state.selectedProcessorId}")
                 }
                 lastProcessorId = state.selectedProcessorId
             }
@@ -393,7 +404,7 @@ class StreamViewModel(
      * Called immediately after [finishPanoramaCapture] when stitching completes.
      * The watcher polls every second so the elapsed-time messages stay accurate.
      */
-    private fun startHierarchyWatcher() {
+    private fun startHierarchyWatcher(autoSave: Boolean = true) {
         val processorId = wearablesViewModel.uiState.value.selectedProcessorId
         val pp = OnDeviceProcessorManager.getProcessor(processorId)
             as? com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
@@ -434,12 +445,15 @@ class StreamViewModel(
             announceText("Panorama ready — $n region${if (n == 1) "" else "s"} found")
 
             // Auto-save the raw stitch so it can be re-analyzed on load.
-            val rawStitch = pp.stitchedResult
-            if (rawStitch != null) {
-                viewModelScope.launch(Dispatchers.IO) {
-                    panoramaSaveManager.save(rawStitch, n)
-                    refreshSavedPanoramas()
-                    Log.d(TAG, "Auto-saved raw panorama with $n nodes")
+            // Skip when this watcher was started for a reload (file already on disk).
+            if (autoSave) {
+                val rawStitch = pp.stitchedResult
+                if (rawStitch != null) {
+                    viewModelScope.launch(Dispatchers.IO) {
+                        panoramaSaveManager.save(rawStitch, n)
+                        refreshSavedPanoramas()
+                        Log.d(TAG, "Auto-saved raw panorama with $n nodes")
+                    }
                 }
             }
             Log.d(TAG, "Hierarchy watcher done — $n nodes, button promoted to PANORAMA_DONE")
@@ -480,7 +494,15 @@ class StreamViewModel(
             ) }
 
             // Reuse the same watcher that drives the Explore button after a live sweep.
-            startHierarchyWatcher()
+            // autoSave=false: file is already on disk, don't create a duplicate.
+            startHierarchyWatcher(autoSave = false)
+        }
+    }
+
+    fun deleteSavedPanorama(id: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            panoramaSaveManager.delete(id)
+            refreshSavedPanoramas()
         }
     }
 
@@ -1130,6 +1152,33 @@ class StreamViewModel(
                 if (processor is com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.videosegmentation.VideoSegmentationProcessor) {
                     processor.requestStopTrack()
                     _uiState.update { it.copy(statusMessage = "Tracking stopped") }
+                }
+            }
+            is VoiceCommandManager.VoiceCommand.StartPanoramaCapture -> {
+                Log.d(TAG, "Voice command: start panorama sweep")
+                val selectedProcessorId = wearablesViewModel.uiState.value.selectedProcessorId
+                val processor = OnDeviceProcessorManager.getProcessor(selectedProcessorId)
+                    as? com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
+                    ?: return
+                if (!processor.isCapturing) {
+                    // Reuse capturePhoto() — its else branch handles the full start flow
+                    // (clears old stitch, starts server streaming, starts capture).
+                    capturePhoto()
+                } else {
+                    Log.d(TAG, "StartPanoramaCapture ignored — already capturing")
+                }
+            }
+            is VoiceCommandManager.VoiceCommand.StopPanoramaCapture -> {
+                Log.d(TAG, "Voice command: stop panorama sweep")
+                val selectedProcessorId = wearablesViewModel.uiState.value.selectedProcessorId
+                val processor = OnDeviceProcessorManager.getProcessor(selectedProcessorId)
+                    as? com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
+                    ?: return
+                if (processor.isCapturing) {
+                    // Reuse capturePhoto() — its isCapturing branch calls stopPanorama().
+                    capturePhoto()
+                } else {
+                    Log.d(TAG, "StopPanoramaCapture ignored — not currently capturing")
                 }
             }
         }

@@ -55,19 +55,8 @@ class PanoramaProcessor : OnDeviceProcessor {
 
     companion object {
         private const val TAG = "PanoramaProcessor"
+        const val PROCESSOR_ID = -108
         private val IDENTITY_H = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)
-
-        // Color palette for annotated panorama — matches FlorenceProcessor's style.
-        private val NODE_COLORS = intArrayOf(
-            android.graphics.Color.rgb(255, 82,  82),   // red
-            android.graphics.Color.rgb(0,   200, 83),   // green
-            android.graphics.Color.rgb(41,  182, 246),  // blue
-            android.graphics.Color.rgb(255, 193, 7),    // amber
-            android.graphics.Color.rgb(171, 71,  188),  // purple
-            android.graphics.Color.rgb(0,   188, 212),  // cyan
-            android.graphics.Color.rgb(255, 138, 101),  // orange
-            android.graphics.Color.rgb(105, 240, 174),  // mint
-        )
 
         // ── Guidance constants ────────────────────────────────────────────────
         private const val MILESTONE_DEG   = 20f    // announce at 20°, 40°, 60° …
@@ -294,6 +283,18 @@ class PanoramaProcessor : OnDeviceProcessor {
 
                 // ── ⑥ Reality Proxy live frame loop ──────────────────────────
                 if (state.phase == PanoramaPhase.REALITY_PROXY && state.stitchedResult != null) {
+                    // Bootstrap keyframes from the live feed when loading from disk
+                    // (no original sweep data). The first frame anchors at 0°; the
+                    // localizer then measures drift as the user pans.
+                    if (state.keyframes.isEmpty()) {
+                        featureTracker?.setReferenceFrame(frame, emptyList())
+                        state.lastAcceptedFrame?.let { if (!it.isRecycled) it.recycle() }
+                        state.lastAcceptedFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
+                        captureKeyframe(frame, 0f, 0f, IDENTITY_H.copyOf())
+                        localizer?.initialize(state.keyframes, featureTracker!!)
+                        state.localizedAngleDeg = 0f
+                    }
+
                     val angle = localizer?.localize(frame, state.keyframes, featureTracker!!)
                         ?: state.localizedAngleDeg
                     state.localizedAngleDeg = angle
@@ -504,6 +505,7 @@ class PanoramaProcessor : OnDeviceProcessor {
      */
     fun buildAnnotatedPanorama(): Bitmap? {
         val panorama = state.stitchedResult ?: return null
+        if (panorama.isRecycled) return null
         val nodes    = state.hierarchyNodes
         if (nodes.isEmpty()) return panorama
 
@@ -538,11 +540,11 @@ class PanoramaProcessor : OnDeviceProcessor {
             canvas.drawRect(rect, fillPaint)
             canvas.drawRect(rect, boxPaint)
 
-            // Label background + text at top of region
+            // Label background + text at top-left of region
             val label     = node.label.take(30)
             val textWidth = labelPaint.measureText(label)
-            canvas.drawRect(rect.left, 0f, rect.left + textWidth + 16f, 52f, labelBgPaint)
-            canvas.drawText(label, rect.left + 8f, 40f, labelPaint)
+            canvas.drawRect(rect.left, rect.top, rect.left + textWidth + 16f, rect.top + 52f, labelBgPaint)
+            canvas.drawText(label, rect.left + 8f, rect.top + 40f, labelPaint)
         }
 
         return output
@@ -575,14 +577,21 @@ class PanoramaProcessor : OnDeviceProcessor {
         val keyframes = state.keyframes
         if (keyframes.isEmpty()) return renderFrame(frame)
 
+        val minAngle = keyframes.minOf { it.angleDeg }
+        // For loaded panoramas the only keyframe is the bootstrap at 0°, so
+        // min == max. Fall back to the pixel-width-derived span so the pointer
+        // tracks across the full panorama image.
+        val maxAngle = keyframes.maxOf { it.angleDeg }
+            .coerceAtLeast(minAngle + panorama.width.toFloat() / PX_PER_DEG)
+
         return realityProxyRenderer.render(
-            frame         = frame,
-            panorama      = panorama,
-            nodes         = state.hierarchyNodes,
+            frame           = frame,
+            panorama        = panorama,
+            nodes           = state.hierarchyNodes,
             currentAngleDeg = state.localizedAngleDeg,
-            minAngleDeg   = keyframes.minOf { it.angleDeg },
-            maxAngleDeg   = keyframes.maxOf { it.angleDeg },
-            focusedNode   = state.focusedNode,
+            minAngleDeg     = minAngle,
+            maxAngleDeg     = maxAngle,
+            focusedNode     = state.focusedNode,
         )
     }
 

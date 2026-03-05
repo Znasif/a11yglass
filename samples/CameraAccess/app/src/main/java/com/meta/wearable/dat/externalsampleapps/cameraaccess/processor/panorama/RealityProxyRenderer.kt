@@ -30,16 +30,24 @@ import android.graphics.RectF
  */
 class RealityProxyRenderer {
 
-    // ── Node outlines ────────────────────────────────────────────────────────
-    private val nodePaint = Paint().apply {
+    // ── Node outlines — color is set per-node from NODE_COLORS ───────────────
+    private val nodeFillPaint = Paint().apply {
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+    private val nodeStrokePaint = Paint().apply {
         style = Paint.Style.STROKE
-        color = Color.argb(160, 200, 200, 200)
-        strokeWidth = 2f
+        strokeWidth = 4f
+        isAntiAlias = true
+    }
+    private val nodeLabelBgPaint = Paint().apply {
+        style = Paint.Style.FILL
         isAntiAlias = true
     }
     private val nodeLabelPaint = Paint().apply {
         color = Color.WHITE
-        textSize = 28f
+        textSize = 32f
+        isFakeBoldText = true
         isAntiAlias = true
         setShadowLayer(2f, 1f, 1f, Color.BLACK)
     }
@@ -134,12 +142,17 @@ class RealityProxyRenderer {
 
         val span = (maxAngleDeg - minAngleDeg).coerceAtLeast(1f)
 
-        // ── 2. Hierarchy node outlines ───────────────────────────────────────
-        for (node in nodes) {
+        // ── 2. Hierarchy node outlines (per-node color, Y-bounded) ──────────
+        for ((idx, node) in nodes.withIndex()) {
             if (node == focusedNode) continue
-            val (left, right) = nodeScreenRect(node, offsetX, drawW)
-            canvas.drawRect(RectF(left, offsetY, right, offsetY + drawH), nodePaint)
-            canvas.drawText(node.label, left + 8f, offsetY + 40f, nodeLabelPaint)
+            val color = NODE_COLORS[idx % NODE_COLORS.size]
+            val rect  = nodeRect(node, offsetX, offsetY, drawW, drawH)
+
+            nodeFillPaint.color   = (color and 0x00FFFFFF) or (50 shl 24)  // 20 % alpha
+            nodeStrokePaint.color = color
+
+            canvas.drawRect(rect, nodeFillPaint)
+            canvas.drawRect(rect, nodeStrokePaint)
         }
 
         // ── 3. Live-feed cutout window ────────────────────────────────────────
@@ -194,13 +207,23 @@ class RealityProxyRenderer {
         canvas.drawLine(fovCenterX - arm, panoCenterY, fovCenterX + arm, panoCenterY, crosshairPaint)
         canvas.drawLine(fovCenterX, panoCenterY - arm, fovCenterX, panoCenterY + arm, crosshairPaint)
 
-        // ── 5. Focused node highlight ────────────────────────────────────────
+        // ── 5. Focused node highlight (same color as its unfocused sibling) ──
         focusedNode?.let { node ->
-            val (left, right) = nodeScreenRect(node, offsetX, drawW)
-            val rect = RectF(left, offsetY, right, offsetY + drawH)
+            val idx   = nodes.indexOf(node).coerceAtLeast(0)
+            val color = NODE_COLORS[idx % NODE_COLORS.size]
+            val rect  = nodeRect(node, offsetX, offsetY, drawW, drawH)
+
+            focusedFillPaint.color   = (color and 0x00FFFFFF) or (100 shl 24) // brighter fill
+            focusedStrokePaint.color = color
+
             canvas.drawRect(rect, focusedFillPaint)
             canvas.drawRect(rect, focusedStrokePaint)
-            canvas.drawText(node.label, left + 8f, offsetY + 40f, nodeLabelPaint)
+
+            nodeLabelBgPaint.color = color
+            val label     = node.label.take(30)
+            val textWidth = nodeLabelPaint.measureText(label)
+            canvas.drawRect(rect.left, rect.top, rect.left + textWidth + 16f, rect.top + 44f, nodeLabelBgPaint)
+            canvas.drawText(label, rect.left + 8f, rect.top + 34f, nodeLabelPaint)
         }
 
         // ── 6. Detail panel ──────────────────────────────────────────────────
@@ -226,13 +249,17 @@ class RealityProxyRenderer {
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
-    private fun nodeScreenRect(
+    private fun nodeRect(
         node: HierarchyNode,
         offsetX: Float,
+        offsetY: Float,
         drawW: Float,
-    ): Pair<Float, Float> {
-        val nodeCenterX   = offsetX + node.panoramaXFraction * drawW
-        val halfNodeWidth = node.panoramaWidthFraction * drawW / 2f
-        return Pair(nodeCenterX - halfNodeWidth, nodeCenterX + halfNodeWidth)
+        drawH: Float,
+    ): RectF {
+        val cx    = offsetX + node.panoramaXFraction      * drawW
+        val cy    = offsetY + node.panoramaYFraction       * drawH
+        val halfW = node.panoramaWidthFraction  * drawW / 2f
+        val halfH = node.panoramaHeightFraction * drawH / 2f
+        return RectF(cx - halfW, cy - halfH, cx + halfW, cy + halfH)
     }
 }

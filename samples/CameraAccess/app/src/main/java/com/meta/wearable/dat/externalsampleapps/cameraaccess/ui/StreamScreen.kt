@@ -26,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.CaptureButtonMode
 import me.saket.telephoto.zoomable.rememberZoomableState
 import me.saket.telephoto.zoomable.zoomable
@@ -96,6 +97,7 @@ fun StreamScreen(
         onShowPanoramaPicker = { streamViewModel.showPanoramaPicker() },
         onHidePanoramaPicker = { streamViewModel.hidePanoramaPicker() },
         onLoadSavedPanorama = { streamViewModel.loadSavedPanorama(it) },
+        onDeleteSavedPanorama = { streamViewModel.deleteSavedPanorama(it) },
         modifier = modifier
     )
 }
@@ -117,6 +119,7 @@ fun StreamScreenContent(
     onShowPanoramaPicker: () -> Unit,
     onHidePanoramaPicker: () -> Unit,
     onLoadSavedPanorama: (String) -> Unit,
+    onDeleteSavedPanorama: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     // Zoomable state for the panorama result viewer. Declared unconditionally per
@@ -351,8 +354,8 @@ fun StreamScreenContent(
                     )
                 }
 
-                // Saved panorama gallery picker
-                IconButton(
+                // Saved panorama gallery picker — only relevant for Panorama processor
+                if (wearablesUiState.selectedProcessorId == PanoramaProcessor.PROCESSOR_ID) IconButton(
                     onClick = onShowPanoramaPicker,
                     modifier = Modifier
                         .size(48.dp)
@@ -455,6 +458,7 @@ fun StreamScreenContent(
         PanoramaPickerDialog(
             panoramas = streamUiState.savedPanoramas,
             onSelect = onLoadSavedPanorama,
+            onDelete = onDeleteSavedPanorama,
             onDismiss = onHidePanoramaPicker,
         )
     }
@@ -479,6 +483,7 @@ private fun StreamScreenPreview() {
         onShowPanoramaPicker = {},
         onHidePanoramaPicker = {},
         onLoadSavedPanorama = {},
+        onDeleteSavedPanorama = {},
     )
 }
 
@@ -486,6 +491,7 @@ private fun StreamScreenPreview() {
 private fun PanoramaPickerDialog(
     panoramas: List<SavedPanorama>,
     onSelect: (String) -> Unit,
+    onDelete: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val dateFormat = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
@@ -528,7 +534,7 @@ private fun PanoramaPickerDialog(
                                     .clip(RoundedCornerShape(4.dp))
                                     .background(Color.Gray.copy(alpha = 0.5f))
                             )
-                            Column {
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = dateFormat.format(Date(pano.timestamp)),
                                     style = MaterialTheme.typography.bodyMedium,
@@ -538,6 +544,16 @@ private fun PanoramaPickerDialog(
                                     text = "${pano.nodeCount} region${if (pano.nodeCount == 1) "" else "s"}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Color.Gray,
+                                )
+                            }
+                            androidx.compose.material3.IconButton(
+                                onClick = { onDelete(pano.id) },
+                                modifier = Modifier.size(36.dp),
+                            ) {
+                                androidx.compose.material3.Icon(
+                                    imageVector = Icons.Default.Delete,
+                                    contentDescription = "Delete",
+                                    tint = Color.Red.copy(alpha = 0.8f),
                                 )
                             }
                         }
