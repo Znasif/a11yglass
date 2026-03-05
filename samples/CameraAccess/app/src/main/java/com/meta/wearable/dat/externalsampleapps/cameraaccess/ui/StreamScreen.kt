@@ -36,10 +36,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.SavedPanorama
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.meta.wearable.dat.camera.types.StreamSessionState
@@ -86,6 +93,9 @@ fun StreamScreen(
         onCapturePhoto = { streamViewModel.capturePhoto() },
         onSharePhoto = { streamViewModel.sharePhoto(it) },
         onHideShareDialog = { streamViewModel.hideShareDialog() },
+        onShowPanoramaPicker = { streamViewModel.showPanoramaPicker() },
+        onHidePanoramaPicker = { streamViewModel.hidePanoramaPicker() },
+        onLoadSavedPanorama = { streamViewModel.loadSavedPanorama(it) },
         modifier = modifier
     )
 }
@@ -104,6 +114,9 @@ fun StreamScreenContent(
     onCapturePhoto: () -> Unit,
     onSharePhoto: (Bitmap) -> Unit,
     onHideShareDialog: () -> Unit,
+    onShowPanoramaPicker: () -> Unit,
+    onHidePanoramaPicker: () -> Unit,
+    onLoadSavedPanorama: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     // Zoomable state for the panorama result viewer. Declared unconditionally per
@@ -338,6 +351,20 @@ fun StreamScreenContent(
                     )
                 }
 
+                // Saved panorama gallery picker
+                IconButton(
+                    onClick = onShowPanoramaPicker,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .background(AppColor.DeepBlue, RoundedCornerShape(8.dp))
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PhotoLibrary,
+                        contentDescription = "Saved panoramas",
+                        tint = Color.White
+                    )
+                }
+
                 // Mute TTS toggle
                 IconButton(
                     onClick = onToggleMute,
@@ -390,6 +417,23 @@ fun StreamScreenContent(
                 textAlign = TextAlign.Center,
             )
         }
+
+        // Floating exit button — only visible in Reality Proxy mode (bottom controls are
+        // hidden there, so we render the yellow ✕ button as a standalone overlay).
+        if (streamUiState.captureButtonMode == CaptureButtonMode.PROXY_ACTIVE) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 16.dp)
+                    .size(56.dp)
+            ) {
+                CaptureButton(
+                    mode = CaptureButtonMode.PROXY_ACTIVE,
+                    onClick = onCapturePhoto,
+                )
+            }
+        }
     }
 
     // Photo share dialog
@@ -404,6 +448,15 @@ fun StreamScreenContent(
                 },
             )
         }
+    }
+
+    // Saved panorama picker dialog
+    if (streamUiState.showPanoramaPicker) {
+        PanoramaPickerDialog(
+            panoramas = streamUiState.savedPanoramas,
+            onSelect = onLoadSavedPanorama,
+            onDismiss = onHidePanoramaPicker,
+        )
     }
 }
 
@@ -422,7 +475,79 @@ private fun StreamScreenPreview() {
         onCycleTimerMode = {},
         onCapturePhoto = {},
         onSharePhoto = {},
-        onHideShareDialog = {}
+        onHideShareDialog = {},
+        onShowPanoramaPicker = {},
+        onHidePanoramaPicker = {},
+        onLoadSavedPanorama = {},
+    )
+}
+
+@Composable
+private fun PanoramaPickerDialog(
+    panoramas: List<SavedPanorama>,
+    onSelect: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val dateFormat = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Saved Panoramas") },
+        text = {
+            if (panoramas.isEmpty()) {
+                Text(
+                    text = "No saved panoramas yet.\nComplete a panorama sweep to save one automatically.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.Gray,
+                )
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(panoramas, key = { it.id }) { pano ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color.DarkGray.copy(alpha = 0.4f))
+                                .clickable { onSelect(pano.id) }
+                                .padding(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            // Thumbnail
+                            pano.thumbnailBitmap?.let { thumb ->
+                                Image(
+                                    bitmap = thumb.asImageBitmap(),
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(width = 96.dp, height = 54.dp)
+                                        .clip(RoundedCornerShape(4.dp)),
+                                    contentScale = ContentScale.Crop,
+                                )
+                            } ?: Box(
+                                modifier = Modifier
+                                    .size(width = 96.dp, height = 54.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color.Gray.copy(alpha = 0.5f))
+                            )
+                            Column {
+                                Text(
+                                    text = dateFormat.format(Date(pano.timestamp)),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = Color.White,
+                                )
+                                Text(
+                                    text = "${pano.nodeCount} region${if (pano.nodeCount == 1) "" else "s"}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.Gray,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Close") }
+        },
     )
 }
 

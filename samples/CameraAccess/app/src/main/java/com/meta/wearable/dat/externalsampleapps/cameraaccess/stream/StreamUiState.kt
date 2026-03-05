@@ -14,6 +14,7 @@ package com.meta.wearable.dat.externalsampleapps.cameraaccess.stream
 
 import android.graphics.Bitmap
 import com.meta.wearable.dat.camera.types.StreamSessionState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.SavedPanorama
 
 enum class CaptureButtonMode {
     CAMERA,              // Default: start sweep / photo capture
@@ -52,6 +53,10 @@ data class StreamUiState(
     // Status
     val statusMessage: String = "",
     val errorMessage: String? = null,
+
+    // Saved panorama picker
+    val savedPanoramas: List<SavedPanorama> = emptyList(),
+    val showPanoramaPicker: Boolean = false,
 ) {
     /**
      * Get the frame to display.

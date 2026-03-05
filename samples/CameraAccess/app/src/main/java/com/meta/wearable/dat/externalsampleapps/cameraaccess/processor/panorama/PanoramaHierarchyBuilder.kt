@@ -48,16 +48,20 @@ class PanoramaHierarchyBuilder {
      *
      * [regions] is a list of (bbox-in-panorama-px, label) pairs. The bbox's
      * horizontal centre maps to an angle; width maps to a panoramaWidthFraction.
+     * Y fields are populated from the bbox so annotations are tight rather than
+     * full-height strips.
      *
-     * @param regions       Florence regions (bbox in panorama pixel coordinates).
+     * @param regions        Florence regions (bbox in panorama pixel coordinates).
      * @param panoramaWidth  Width of the stitched panorama bitmap in px.
-     * @param minAngleDeg   Minimum angle in the panorama sweep.
-     * @param maxAngleDeg   Maximum angle in the panorama sweep.
+     * @param panoramaHeight Height of the stitched panorama bitmap in px.
+     * @param minAngleDeg    Minimum angle in the panorama sweep.
+     * @param maxAngleDeg    Maximum angle in the panorama sweep.
      * @param fallbackFovDeg Horizontal FOV, used to seed computedFovDeg for findNodeAt().
      */
     fun buildFromFlorence(
         regions: List<Pair<RectF, String>>,
         panoramaWidth: Int,
+        panoramaHeight: Int,
         minAngleDeg: Float,
         maxAngleDeg: Float,
         fallbackFovDeg: Float,
@@ -67,14 +71,18 @@ class PanoramaHierarchyBuilder {
         val span = (maxAngleDeg - minAngleDeg).coerceAtLeast(1f)
 
         return regions.mapIndexed { index, (bbox, label) ->
-            val xFraction     = (bbox.centerX() / panoramaWidth).coerceIn(0f, 1f)
-            val widthFraction = (bbox.width()   / panoramaWidth).coerceIn(0.01f, 1f)
+            val xFraction      = (bbox.centerX() / panoramaWidth).coerceIn(0f, 1f)
+            val widthFraction  = (bbox.width()   / panoramaWidth).coerceIn(0.01f, 1f)
+            val yFraction      = (bbox.centerY() / panoramaHeight).coerceIn(0f, 1f)
+            val heightFraction = (bbox.height()  / panoramaHeight).coerceIn(0.01f, 1f)
             HierarchyNode(
-                label                 = label,
-                angleDeg              = minAngleDeg + xFraction * span,
-                panoramaXFraction     = xFraction,
-                panoramaWidthFraction = widthFraction,
-                keyframeIndex         = index,
+                label                  = label,
+                angleDeg               = minAngleDeg + xFraction * span,
+                panoramaXFraction      = xFraction,
+                panoramaWidthFraction  = widthFraction,
+                panoramaYFraction      = yFraction,
+                panoramaHeightFraction = heightFraction,
+                keyframeIndex          = index,
             )
         }.sortedBy { it.angleDeg }
     }

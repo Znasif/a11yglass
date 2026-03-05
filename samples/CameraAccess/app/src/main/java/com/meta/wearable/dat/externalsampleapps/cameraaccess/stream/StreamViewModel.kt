@@ -50,6 +50,7 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.VoiceCommandM
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.network.models.ParsedResponse
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessorManager
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessorResult
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaSaveManager
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -91,6 +92,9 @@ class StreamViewModel(
     val uiState: StateFlow<StreamUiState> = _uiState.asStateFlow()
 
     private val streamTimer = StreamTimer()
+
+    // Panorama persistence
+    private val panoramaSaveManager = PanoramaSaveManager(application)
 
     // Audio managers
     private val audioStreamManager = AudioStreamManager(application)
@@ -161,6 +165,11 @@ class StreamViewModel(
             ttsManager.isMuted.collect { isMuted ->
                 _uiState.update { it.copy(isAudioMuted = isMuted) }
             }
+        }
+
+        // Pre-load saved panorama list so the gallery button is ready immediately.
+        viewModelScope.launch(Dispatchers.IO) {
+            refreshSavedPanoramas()
         }
 
         // Clear processed frame when processor changes (discard old processor's frames)
@@ -413,12 +422,71 @@ class StreamViewModel(
                 delay(1_000L)
             }
 
-            // Hierarchy is ready — activate the Explore button.
+            // Hierarchy is ready — activate the Explore button and apply colored overlays.
             val n = pp.hierarchyNodeCount
-            _uiState.update { it.copy(captureButtonMode = CaptureButtonMode.PANORAMA_DONE) }
+            val annotated = pp.buildAnnotatedPanorama()
+            _uiState.update { state ->
+                state.copy(
+                    captureButtonMode = CaptureButtonMode.PANORAMA_DONE,
+                    processedFrame = annotated ?: state.processedFrame,
+                )
+            }
             announceText("Panorama ready — $n region${if (n == 1) "" else "s"} found")
+
+            // Auto-save the raw stitch so it can be re-analyzed on load.
+            val rawStitch = pp.stitchedResult
+            if (rawStitch != null) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    panoramaSaveManager.save(rawStitch, n)
+                    refreshSavedPanoramas()
+                    Log.d(TAG, "Auto-saved raw panorama with $n nodes")
+                }
+            }
             Log.d(TAG, "Hierarchy watcher done — $n nodes, button promoted to PANORAMA_DONE")
         }
+    }
+
+    // ========== Saved Panorama Picker ==========
+
+    fun showPanoramaPicker() {
+        viewModelScope.launch(Dispatchers.IO) {
+            refreshSavedPanoramas()  // refresh list just before showing
+            _uiState.update { it.copy(showPanoramaPicker = true) }
+        }
+    }
+
+    fun hidePanoramaPicker() {
+        _uiState.update { it.copy(showPanoramaPicker = false) }
+    }
+
+    fun loadSavedPanorama(id: String) {
+        val processorId = wearablesViewModel.uiState.value.selectedProcessorId
+        val pp = OnDeviceProcessorManager.getProcessor(processorId)
+            as? com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
+            ?: return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val bitmap = panoramaSaveManager.load(id) ?: return@launch
+
+            // Hand the raw stitch to the processor — it will re-run Florence and
+            // signal hierarchyReady when done, just like after a live sweep.
+            pp.loadAndAnalyzePanorama(bitmap)
+
+            _uiState.update { it.copy(
+                processedFrame     = bitmap,
+                captureButtonMode  = CaptureButtonMode.PANORAMA_ANALYZING,
+                showPanoramaPicker = false,
+                statusMessage      = "Re-analyzing saved panorama…",
+            ) }
+
+            // Reuse the same watcher that drives the Explore button after a live sweep.
+            startHierarchyWatcher()
+        }
+    }
+
+    private suspend fun refreshSavedPanoramas() {
+        val list = panoramaSaveManager.listSaved()
+        _uiState.update { it.copy(savedPanoramas = list) }
     }
 
     /** Update responseText, forward to server repository, and optionally speak via TTS. */

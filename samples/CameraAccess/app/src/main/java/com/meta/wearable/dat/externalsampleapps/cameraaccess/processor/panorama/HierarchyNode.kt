@@ -21,6 +21,10 @@ data class HierarchyNode(
     val panoramaXFraction: Float,
     val panoramaWidthFraction: Float,
     val keyframeIndex: Int,
+    /** Normalised vertical centre (0–1) in the stitched bitmap. Defaults to 0.5 (middle). */
+    val panoramaYFraction: Float = 0.5f,
+    /** Normalised vertical span (0–1) of the bbox. Defaults to 1.0 (full height). */
+    val panoramaHeightFraction: Float = 1.0f,
     val description: String = "",
     val children: List<HierarchyNode> = emptyList(),
 )

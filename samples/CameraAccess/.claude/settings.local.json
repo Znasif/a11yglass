@@ -3,7 +3,10 @@
     "allow": [
       "Bash(dir D:\\\\Projects\\\\a11yglass\\\\samples\\\\CameraAccess:*)",
       "mcp__ide__getDiagnostics",
-      "Bash(ls -la \"D:/Projects/a11yglass/samples/CameraAccess/app/src/main/assets/models/florence/\"*_fp16.onnx \"D:/Projects/a11yglass/samples/CameraAccess/app/src/main/assets/models/florence/\"*_q4.onnx)"
+      "Bash(ls -la \"D:/Projects/a11yglass/samples/CameraAccess/app/src/main/assets/models/florence/\"*_fp16.onnx \"D:/Projects/a11yglass/samples/CameraAccess/app/src/main/assets/models/florence/\"*_q4.onnx)",
+      "WebFetch(domain:wearables.developer.meta.com)",
+      "Bash(xxd:*)",
+      "Bash(xargs grep:*)"
     ]
   }
 }

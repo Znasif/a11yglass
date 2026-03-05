@@ -9,6 +9,7 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.util.Base64
 import android.util.Log
+import kotlin.math.ceil
 import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
@@ -464,6 +465,41 @@ class FlorenceProcessor : OnDeviceProcessor {
                 isProcessing.set(false)
             }
         }
+    }
+
+    /**
+     * Tiled variant of [analyzeRegions] for wide-aspect bitmaps (e.g. stitched panoramas).
+     *
+     * Splits [bitmap] into vertical strips of width = [bitmap.height] (square tiles),
+     * runs [analyzeRegions] on each in sequence, then offsets each bbox's X by the
+     * tile's left edge. The last tile may be narrower than tall; Florence handles it fine.
+     *
+     * Returns all regions in [bitmap]'s original pixel coordinate space.
+     * Y coordinates are meaningful because each tile has a ~1:1 aspect ratio,
+     * so Florence's internal padding is minimal.
+     */
+    suspend fun analyzeRegionsTiled(bitmap: Bitmap): List<Pair<RectF, String>> {
+        val tileW   = bitmap.height  // square tiles
+        val numTiles = ceil(bitmap.width.toFloat() / tileW).toInt().coerceAtLeast(1)
+        val results  = mutableListOf<Pair<RectF, String>>()
+
+        for (i in 0 until numTiles) {
+            val xStart      = i * tileW
+            val actualWidth = minOf(tileW, bitmap.width - xStart)
+            val tile = Bitmap.createBitmap(bitmap, xStart, 0, actualWidth, bitmap.height)
+            Log.d(TAG, "analyzeRegionsTiled: tile $i/$numTiles x=[$xStart,${xStart + actualWidth}] ${actualWidth}×${bitmap.height}")
+
+            val regions = analyzeRegions(tile)
+            tile.recycle()
+
+            for ((bbox, label) in regions) {
+                results.add(RectF(bbox.left + xStart, bbox.top,
+                                  bbox.right + xStart, bbox.bottom) to label)
+            }
+        }
+
+        Log.d(TAG, "analyzeRegionsTiled: ${results.size} total regions across $numTiles tiles")
+        return results
     }
 
     // ── Data ──────────────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RectF
 import android.util.Log
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessor
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessorResult
@@ -55,6 +56,18 @@ class PanoramaProcessor : OnDeviceProcessor {
     companion object {
         private const val TAG = "PanoramaProcessor"
         private val IDENTITY_H = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)
+
+        // Color palette for annotated panorama — matches FlorenceProcessor's style.
+        private val NODE_COLORS = intArrayOf(
+            android.graphics.Color.rgb(255, 82,  82),   // red
+            android.graphics.Color.rgb(0,   200, 83),   // green
+            android.graphics.Color.rgb(41,  182, 246),  // blue
+            android.graphics.Color.rgb(255, 193, 7),    // amber
+            android.graphics.Color.rgb(171, 71,  188),  // purple
+            android.graphics.Color.rgb(0,   188, 212),  // cyan
+            android.graphics.Color.rgb(255, 138, 101),  // orange
+            android.graphics.Color.rgb(105, 240, 174),  // mint
+        )
 
         // ── Guidance constants ────────────────────────────────────────────────
         private const val MILESTONE_DEG   = 20f    // announce at 20°, 40°, 60° …
@@ -112,9 +125,10 @@ class PanoramaProcessor : OnDeviceProcessor {
     private var lastAnnouncedNodeLabel: String? = null
 
     // ── Public state ─────────────────────────────────────────────────────────
-    val isCapturing: Boolean       get() = state.isCapturing
-    val phase: PanoramaPhase       get() = state.phase
+    val isCapturing: Boolean        get() = state.isCapturing
+    val phase: PanoramaPhase        get() = state.phase
     val hasStitchedResult: Boolean  get() = state.stitchedResult != null
+    val stitchedResult: Bitmap?     get() = state.stitchedResult
     val hierarchyNodeCount: Int     get() = state.hierarchyNodes.size
 
     // ── Overlay paint ────────────────────────────────────────────────────────
@@ -199,15 +213,16 @@ class PanoramaProcessor : OnDeviceProcessor {
                             val nodes: List<HierarchyNode>
                             if (fp != null) {
                                 Log.d(TAG, "Launching Florence scene analysis on ${panorama.width}×${panorama.height} panorama…")
-                                val regions = fp.analyzeRegions(panorama)
-                                nodes = if (regions.isNotEmpty()) {
+                                val regions = fp.analyzeRegionsTiled(panorama)
+
+                nodes = if (regions.isNotEmpty()) {
                                     val minAngle = keyframeSnapshot.minOf { it.angleDeg }
                                     val maxAngle = keyframeSnapshot.maxOf { it.angleDeg }
                                     val fov = keyframeSnapshot.firstOrNull()?.bitmap?.let {
                                         cameraHFovDeg(it.width, it.height)
                                     } ?: 65f
                                     hierarchyBuilder.buildFromFlorence(
-                                        regions, panoramaWidth, minAngle, maxAngle, fov
+                                        regions, panoramaWidth, panorama.height, minAngle, maxAngle, fov
                                     ).also { Log.d(TAG, "Florence hierarchy: ${it.size} nodes") }
                                 } else {
                                     Log.d(TAG, "Florence returned no regions — falling back to angle labels")
@@ -419,10 +434,118 @@ class PanoramaProcessor : OnDeviceProcessor {
         Log.d(TAG, "enterRealityProxy() requested — $nodeCount nodes available so far")
     }
 
-    /** Exit Reality Proxy mode and return to frozen panorama display. */
+    /**
+     * Exit Reality Proxy mode and return to frozen panorama display.
+     *
+     * Phase is reset immediately rather than via a flag, because
+     * finishPanoramaCapture() cancels localProcessingJob before the next
+     * process() call can run — so the flag would never be consumed and
+     * state.phase would remain REALITY_PROXY, breaking re-entry.
+     */
     fun exitRealityProxy() {
-        exitProxyRequested = true
-        Log.d(TAG, "exitRealityProxy() requested")
+        exitProxyRequested = false   // clear any stale flag
+        state.phase = PanoramaPhase.IDLE
+        localizer?.reset()
+        lastAnnouncedNodeLabel = null
+        Log.d(TAG, "exitRealityProxy() — phase reset to IDLE immediately")
+    }
+
+    /**
+     * Load a previously saved panorama bitmap and re-run the Florence scene analysis
+     * pipeline on it, exactly as happens after a live sweep.
+     *
+     * - Sets [state.stitchedResult] to the provided bitmap.
+     * - Resets hierarchy and fires [_hierarchyReady] false → true when done.
+     * - [StreamViewModel.startHierarchyWatcher] can be called immediately after to
+     *   drive UI state in the same way as after a live stitch.
+     *
+     * Angle values are inferred from pixel width (minAngle=0, maxAngle=width/PX_PER_DEG).
+     * This is only used for Reality Proxy localization, which is unavailable without
+     * live keyframes; overlay display is purely fraction-based and is unaffected.
+     */
+    fun loadAndAnalyzePanorama(bitmap: Bitmap) {
+        val copy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        state.stitchedResult  = copy
+        state.hierarchyNodes  = emptyList()
+        state.phase           = PanoramaPhase.IDLE
+        hierarchyBuilder.setNodes(emptyList())
+        _hierarchyReady.value = false
+
+        val fp = florenceProcessor
+        processorScope.launch {
+            val nodes: List<HierarchyNode>
+            if (fp != null) {
+                Log.d(TAG, "loadAndAnalyzePanorama: launching Florence on ${copy.width}×${copy.height}")
+                val regions = fp.analyzeRegionsTiled(copy)
+                nodes = if (regions.isNotEmpty()) {
+                    val inferredMaxAngle = copy.width / PX_PER_DEG
+                    hierarchyBuilder.buildFromFlorence(
+                        regions, copy.width, copy.height, 0f, inferredMaxAngle, 65f
+                    ).also { Log.d(TAG, "loadAndAnalyzePanorama: ${it.size} nodes from Florence") }
+                } else {
+                    Log.d(TAG, "loadAndAnalyzePanorama: Florence returned no regions")
+                    emptyList()
+                }
+            } else {
+                Log.d(TAG, "loadAndAnalyzePanorama: no Florence processor — no hierarchy")
+                nodes = emptyList()
+            }
+            hierarchyBuilder.setNodes(nodes)
+            state.hierarchyNodes  = nodes
+            _hierarchyReady.value = true
+        }
+    }
+
+    /**
+     * Draw colored node overlays onto a copy of the stitched panorama.
+     * Called by StreamViewModel when the hierarchy is ready so the stitch
+     * viewer shows annotated regions before the user enters Reality Proxy.
+     * Returns null if no stitched result is available yet.
+     */
+    fun buildAnnotatedPanorama(): Bitmap? {
+        val panorama = state.stitchedResult ?: return null
+        val nodes    = state.hierarchyNodes
+        if (nodes.isEmpty()) return panorama
+
+        val output = panorama.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(output)
+        val w = output.width.toFloat()
+        val h = output.height.toFloat()
+
+        val boxPaint   = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 6f; isAntiAlias = true }
+        val fillPaint  = Paint().apply { style = Paint.Style.FILL }
+        val labelBgPaint = Paint().apply { style = Paint.Style.FILL }
+        val labelPaint = Paint().apply {
+            color = Color.WHITE; textSize = 36f; isFakeBoldText = true; isAntiAlias = true
+            setShadowLayer(2f, 1f, 1f, Color.BLACK)
+        }
+
+        for ((idx, node) in nodes.withIndex()) {
+            val color  = NODE_COLORS[idx % NODE_COLORS.size]
+            val cx     = node.panoramaXFraction      * w
+            val cy     = node.panoramaYFraction       * h
+            val halfW  = node.panoramaWidthFraction  * w / 2f
+            val halfH  = node.panoramaHeightFraction * h / 2f
+            val rect   = RectF(
+                (cx - halfW).coerceAtLeast(0f), (cy - halfH).coerceAtLeast(0f),
+                (cx + halfW).coerceAtMost(w),   (cy + halfH).coerceAtMost(h),
+            )
+
+            fillPaint.color  = (color and 0x00FFFFFF) or (50 shl 24)   // 20% alpha fill
+            boxPaint.color   = color
+            labelBgPaint.color = color
+
+            canvas.drawRect(rect, fillPaint)
+            canvas.drawRect(rect, boxPaint)
+
+            // Label background + text at top of region
+            val label     = node.label.take(30)
+            val textWidth = labelPaint.measureText(label)
+            canvas.drawRect(rect.left, 0f, rect.left + textWidth + 16f, 52f, labelBgPaint)
+            canvas.drawText(label, rect.left + 8f, 40f, labelPaint)
+        }
+
+        return output
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
