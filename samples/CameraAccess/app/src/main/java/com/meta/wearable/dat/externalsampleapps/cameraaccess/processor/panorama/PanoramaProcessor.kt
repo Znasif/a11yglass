@@ -241,7 +241,14 @@ class PanoramaProcessor : OnDeviceProcessor {
                     realityProxyRequested = false
                     state.phase = PanoramaPhase.REALITY_PROXY
                     lastAnnouncedNodeLabel = null
-                    localizer?.initialize(state.keyframes, featureTracker!!)
+                    state.stitchedResult?.let { panorama ->
+                        // Strip must be the same pixel width as the live frame so both images
+                        // compress identically inside FeatureTracker's 512×512 normalisation.
+                        // Using hFOV×PX_PER_DEG (260px) vs frame.width (720px) causes a 2.77×
+                        // x-scale mismatch in descriptor space → false positive matches.
+                        val stripWidthPx = frame.width.coerceAtMost(panorama.width)
+                        localizer?.initialize(panorama, stripWidthPx)
+                    }
                     Log.d(TAG, "Entered Reality Proxy mode — ${state.hierarchyNodes.size} nodes, " +
                         "${state.keyframes.size} keyframes")
 
@@ -283,21 +290,20 @@ class PanoramaProcessor : OnDeviceProcessor {
 
                 // ── ⑥ Reality Proxy live frame loop ──────────────────────────
                 if (state.phase == PanoramaPhase.REALITY_PROXY && state.stitchedResult != null) {
-                    // Bootstrap keyframes from the live feed when loading from disk
-                    // (no original sweep data). The first frame anchors at 0°; the
-                    // localizer then measures drift as the user pans.
-                    if (state.keyframes.isEmpty()) {
-                        featureTracker?.setReferenceFrame(frame, emptyList())
-                        state.lastAcceptedFrame?.let { if (!it.isRecycled) it.recycle() }
-                        state.lastAcceptedFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
-                        captureKeyframe(frame, 0f, 0f, IDENTITY_H.copyOf())
-                        localizer?.initialize(state.keyframes, featureTracker!!)
-                        state.localizedAngleDeg = 0f
-                    }
+                    Log.v(TAG, "RP frame ${frame.width}×${frame.height}")
+                    // Convert X fraction → angle using panorama's angle range.
+                    // For loaded panoramas with no keyframes, infer range from pixel width.
+                    val panorama = state.stitchedResult!!
+                    val minAngle = state.keyframes.minOfOrNull { it.angleDeg } ?: 0f
+                    val maxAngle = state.keyframes.maxOfOrNull { it.angleDeg }
+                        ?.coerceAtLeast(minAngle + panorama.width.toFloat() / PX_PER_DEG)
+                        ?: (panorama.width.toFloat() / PX_PER_DEG)
 
-                    val angle = localizer?.localize(frame, state.keyframes, featureTracker!!)
-                        ?: state.localizedAngleDeg
-                    state.localizedAngleDeg = angle
+                    val xFraction = localizer?.localize(frame, featureTracker!!)
+                    if (xFraction != null) {
+                        state.localizedAngleDeg = minAngle + xFraction * (maxAngle - minAngle)
+                    }
+                    val angle = state.localizedAngleDeg
 
                     val prevFocused = state.focusedNode
                     state.focusedNode = hierarchyBuilder.findNodeAt(angle)
@@ -574,15 +580,10 @@ class PanoramaProcessor : OnDeviceProcessor {
      */
     private fun renderRealityProxy(frame: Bitmap): Bitmap {
         val panorama = state.stitchedResult ?: return renderFrame(frame)
-        val keyframes = state.keyframes
-        if (keyframes.isEmpty()) return renderFrame(frame)
-
-        val minAngle = keyframes.minOf { it.angleDeg }
-        // For loaded panoramas the only keyframe is the bootstrap at 0°, so
-        // min == max. Fall back to the pixel-width-derived span so the pointer
-        // tracks across the full panorama image.
-        val maxAngle = keyframes.maxOf { it.angleDeg }
-            .coerceAtLeast(minAngle + panorama.width.toFloat() / PX_PER_DEG)
+        val minAngle = state.keyframes.minOfOrNull { it.angleDeg } ?: 0f
+        val maxAngle = state.keyframes.maxOfOrNull { it.angleDeg }
+            ?.coerceAtLeast(minAngle + panorama.width.toFloat() / PX_PER_DEG)
+            ?: (panorama.width.toFloat() / PX_PER_DEG)
 
         return realityProxyRenderer.render(
             frame           = frame,

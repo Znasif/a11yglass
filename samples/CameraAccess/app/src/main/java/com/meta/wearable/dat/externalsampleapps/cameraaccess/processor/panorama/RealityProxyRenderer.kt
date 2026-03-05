@@ -164,15 +164,21 @@ class RealityProxyRenderer {
         val hFov         = cameraHFovDeg(frame.width, frame.height)
         val cutoutFovDeg = hFov * POINTING_FRACTION
         val fovCenterX   = offsetX + (currentAngleDeg - minAngleDeg) / span * drawW
-        val cutoutHalfW  = (cutoutFovDeg / span * drawW / 2f).coerceAtLeast(16f)
-        val cutoutHalfH  = POINTING_FRACTION * drawH / 2f
         val panoCenterY  = offsetY + drawH / 2f
 
+        // Make the cutout square: compute both axes independently, use the smaller.
+        // The horizontal formula is only reliable when span is accurately known;
+        // the vertical is more stable. A square window is cleaner and avoids a
+        // degenerate sliver when the inferred span is too large.
+        val computedHalfW = cutoutFovDeg / span * drawW / 2f
+        val computedHalfH = POINTING_FRACTION * drawH / 2f
+        val cutoutHalf    = minOf(computedHalfW, computedHalfH).coerceAtLeast(16f)
+
         val cutoutRect = RectF(
-            fovCenterX  - cutoutHalfW,
-            panoCenterY - cutoutHalfH,
-            fovCenterX  + cutoutHalfW,
-            panoCenterY + cutoutHalfH,
+            fovCenterX  - cutoutHalf,
+            panoCenterY - cutoutHalf,
+            fovCenterX  + cutoutHalf,
+            panoCenterY + cutoutHalf,
         )
 
         // Centre-crop POINTING_FRACTION of the live frame
