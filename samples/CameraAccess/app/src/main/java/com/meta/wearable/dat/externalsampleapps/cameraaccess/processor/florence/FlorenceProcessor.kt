@@ -28,7 +28,7 @@ import java.io.InputStreamReader
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicBoolean  // modelReady
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -64,7 +64,7 @@ import java.util.concurrent.atomic.AtomicReference
  *  - [@JavascriptInterface] callbacks run on the WebView binder thread; they simply
  *    complete a [CompletableDeferred], which is thread-safe.
  */
-class FlorenceProcessor : OnDeviceProcessor {
+class FlorenceProcessor : OnDeviceProcessor() {
 
     companion object {
         private const val TAG = "FlorenceProcessor"
@@ -91,7 +91,6 @@ class FlorenceProcessor : OnDeviceProcessor {
     private var webView: WebView? = null
     private var assetServer: AssetServer? = null
     private val modelReady    = AtomicBoolean(false)
-    private val isProcessing  = AtomicBoolean(false)
     private val loadingStatus = AtomicReference("Loading Florence-2…")
 
     /** Completed by the JS bridge when an inference result arrives. */

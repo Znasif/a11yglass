@@ -28,51 +28,32 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.NODE_COLORS
-import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
-import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.POINTING_FRACTION
-import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.CaptureButtonMode
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.foundation.border
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.role
-import androidx.compose.ui.semantics.semantics
-
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.SavedPanorama
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.meta.wearable.dat.camera.types.StreamSessionState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.R
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.CaptureButtonMode
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.StreamUiState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.StreamViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.components.ProcessorSpinner
-import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
-import androidx.compose.ui.tooling.preview.Preview
-import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.StreamUiState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.panorama.PanoramaGalleryButton
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.panorama.PanoramaOverlay
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.panorama.PanoramaPickerDialog
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesUiState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 
 @Composable
 fun StreamScreen(
@@ -95,7 +76,7 @@ fun StreamScreen(
     StreamScreenContent(
         streamUiState = streamUiState,
         wearablesUiState = wearablesUiState,
-        onStartStream = { streamViewModel.startStream() },
+        showPanoramaGallery = wearablesUiState.selectedProcessorId == PanoramaProcessor.PROCESSOR_ID,
         onStopStream = {
             streamViewModel.stopStream()
             wearablesViewModel.navigateToDeviceSelection()
@@ -113,7 +94,7 @@ fun StreamScreen(
         onLoadSavedPanorama = { streamViewModel.loadSavedPanorama(it) },
         onDeleteSavedPanorama = { streamViewModel.deleteSavedPanorama(it) },
         onStepNode = { streamViewModel.stepNode(it) },
-        modifier = modifier
+        modifier = modifier,
     )
 }
 
@@ -121,7 +102,6 @@ fun StreamScreen(
 fun StreamScreenContent(
     streamUiState: StreamUiState,
     wearablesUiState: WearablesUiState,
-    onStartStream: () -> Unit,
     onStopStream: () -> Unit,
     onProcessorSelected: (Int) -> Unit,
     onToggleServerStreaming: () -> Unit,
@@ -135,23 +115,10 @@ fun StreamScreenContent(
     onHidePanoramaPicker: () -> Unit,
     onLoadSavedPanorama: (String) -> Unit,
     onDeleteSavedPanorama: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    showPanoramaGallery: Boolean = false,
     onStepNode: (Int) -> Unit = {},
-    modifier: Modifier = Modifier
 ) {
-    // Manual pan position for PANORAMA_ANALYZING / PANORAMA_DONE phases.
-    // Reset to centre whenever a new panorama is loaded.
-    var manualXFraction by remember { mutableStateOf(0.5f) }
-    LaunchedEffect(streamUiState.carouselPanorama) { manualXFraction = 0.5f }
-
-    // When the focused node changes (via stepNode), snap the pan to that node.
-    val currentNodeIndex = streamUiState.currentNodeIndex
-    LaunchedEffect(currentNodeIndex) {
-        val nodes = streamUiState.hierarchyNodes
-        if (currentNodeIndex in nodes.indices) {
-            manualXFraction = nodes[currentNodeIndex].panoramaXFraction
-        }
-    }
-
     val isCarouselMode = streamUiState.captureButtonMode in listOf(
         CaptureButtonMode.PANORAMA_ANALYZING,
         CaptureButtonMode.PANORAMA_DONE,
@@ -159,130 +126,16 @@ fun StreamScreenContent(
     )
 
     Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
+
         if (isCarouselMode) {
-            // ── Panorama image viewer (post-stitch phases) ──────────────────────
-            // During PROXY_ACTIVE the localizer drives xFraction; otherwise the
-            // user pans with a horizontal swipe. ContentScale.FillHeight keeps the
-            // panorama at its natural aspect ratio filling screen height; BiasAlignment
-            // scrolls the visible slice without requiring bitmap copies.
-            streamUiState.carouselPanorama?.let { panorama ->
-                val xFraction = if (streamUiState.captureButtonMode == CaptureButtonMode.PROXY_ACTIVE)
-                    streamUiState.carouselXFraction else manualXFraction
-
-                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                    // Panorama image
-                    // Swipe behaviour:
-                    // • PANORAMA_DONE with nodes → discrete step (left/right = prev/next node)
-                    // • PROXY_ACTIVE or no nodes → continuous pan
-                    val discreteSwipe = streamUiState.captureButtonMode == CaptureButtonMode.PANORAMA_DONE
-                        && streamUiState.hierarchyNodes.isNotEmpty()
-                    Image(
-                        bitmap = panorama.asImageBitmap(),
-                        contentDescription = null,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .pointerInput(discreteSwipe) {
-                                if (discreteSwipe) {
-                                    var accumulated = 0f
-                                    detectHorizontalDragGestures(
-                                        onDragEnd = { accumulated = 0f },
-                                        onDragCancel = { accumulated = 0f },
-                                    ) { _, dragAmount ->
-                                        accumulated += dragAmount
-                                        val threshold = size.width * 0.15f
-                                        if (accumulated > threshold) {
-                                            onStepNode(-1)
-                                            accumulated = 0f
-                                        } else if (accumulated < -threshold) {
-                                            onStepNode(+1)
-                                            accumulated = 0f
-                                        }
-                                    }
-                                } else {
-                                    detectHorizontalDragGestures { _, dragAmount ->
-                                        manualXFraction = (manualXFraction - dragAmount / size.width * 2f)
-                                            .coerceIn(0f, 1f)
-                                    }
-                                }
-                            },
-                        contentScale = ContentScale.FillHeight,
-                        alignment = BiasAlignment(
-                            horizontalBias = 2f * xFraction - 1f,
-                            verticalBias = 0f,
-                        ),
-                    )
-
-                    // ── Coordinate mapping ──────────────────────────────────────
-                    // displayedW: width of the panorama when its height fills the screen.
-                    // viewOffsetX: screen-space x position of the panorama's left edge
-                    //              (negative when panorama is wider than the screen).
-                    val displayedW: Dp = maxHeight * panorama.width / panorama.height
-                    val viewOffsetX: Dp = (maxWidth - displayedW) * xFraction
-
-                    // ── Hierarchy node overlay buttons ──────────────────────────
-                    streamUiState.hierarchyNodes.forEachIndexed { idx, node ->
-                        val centerX = viewOffsetX + displayedW * node.panoramaXFraction
-                        val nodeW   = maxOf(displayedW * node.panoramaWidthFraction, 72.dp)
-                        val left    = centerX - nodeW / 2
-                        // Skip nodes entirely off-screen to avoid wasting measure passes.
-                        if (left > maxWidth || left + nodeW < 0.dp) return@forEachIndexed
-                        val centerY = maxHeight * node.panoramaYFraction
-                        val nodeH   = 36.dp
-                        val top     = (centerY - nodeH / 2).coerceIn(0.dp, maxHeight - nodeH)
-                        val color     = Color(NODE_COLORS[idx % NODE_COLORS.size])
-                        val isFocused = idx == currentNodeIndex
-                        val borderColor = if (isFocused) Color.Yellow else Color.White.copy(alpha = 0.7f)
-                        val borderWidth = if (isFocused) 2.dp else 1.dp
-                        Box(
-                            modifier = Modifier
-                                .offset(x = left, y = top)
-                                .size(nodeW, nodeH)
-                                .border(borderWidth, borderColor, RoundedCornerShape(8.dp))
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(color.copy(alpha = if (isFocused) 0.95f else 0.75f))
-                                .semantics(mergeDescendants = true) {
-                                    contentDescription = node.label
-                                    role = Role.Button
-                                }
-                                .clickable { manualXFraction = node.panoramaXFraction }
-                                .padding(horizontal = 6.dp, vertical = 2.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                text = node.label,
-                                color = Color.White,
-                                fontSize = 10.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    }
-
-                    // ── Reality Proxy: live camera cutout in screen centre ───────
-                    if (streamUiState.captureButtonMode == CaptureButtonMode.PROXY_ACTIVE) {
-                        streamUiState.videoFrame?.let { live ->
-                            val cutoutW = maxWidth * POINTING_FRACTION
-                            val cutoutH = cutoutW * live.height / live.width
-                            Box(
-                                modifier = Modifier
-                                    .size(cutoutW, cutoutH)
-                                    .align(Alignment.Center)
-                                    .border(2.dp, Color.White, RoundedCornerShape(4.dp))
-                                    .clip(RoundedCornerShape(4.dp)),
-                            ) {
-                                Image(
-                                    bitmap = live.asImageBitmap(),
-                                    contentDescription = null,
-                                    modifier = Modifier.fillMaxSize(),
-                                    contentScale = ContentScale.Crop,
-                                )
-                            }
-                        }
-                    }
-                }
-            }
+            // Panorama viewer — all implementation details live in PanoramaOverlay.
+            PanoramaOverlay(
+                streamUiState = streamUiState,
+                onStepNode = onStepNode,
+                onCapturePhoto = onCapturePhoto,
+            )
         } else {
-            // ── Live camera feed or in-progress processor overlay ───────────────
+            // Live camera feed or in-progress processor overlay.
             streamUiState.displayFrame?.let { frame ->
                 Image(
                     bitmap = frame.asImageBitmap(),
@@ -297,96 +150,85 @@ fun StreamScreenContent(
         if (streamUiState.streamSessionState == StreamSessionState.STARTING) {
             CircularProgressIndicator(
                 modifier = Modifier.align(Alignment.Center),
-                color = Color.White
+                color = Color.White,
             )
         }
 
-        // Top bar with status and response
+        // Top bar: status chips, processor selector, response text, errors
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.TopCenter)
                 .systemBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            // Status indicators row
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                // Server streaming status
                 StatusChip(
                     label = if (streamUiState.isStreamingToServer) "Streaming" else "Local",
                     isActive = streamUiState.isStreamingToServer,
-                    activeColor = AppColor.Green
+                    activeColor = AppColor.Green,
                 )
-
-                // Audio streaming status (includes voice commands)
                 val isMicActive = streamUiState.isAudioStreaming || streamUiState.isVoiceListening
                 StatusChip(
                     label = if (isMicActive) "Mic On" else "Mic Off",
                     isActive = isMicActive,
-                    activeColor = AppColor.Green
+                    activeColor = AppColor.Green,
                 )
-
-                // Mute status
                 StatusChip(
                     label = if (streamUiState.isAudioMuted) "Muted" else "Unmuted",
                     isActive = !streamUiState.isAudioMuted,
-                    activeColor = Color.White
+                    activeColor = Color.White,
                 )
             }
 
-            // Processor selector spinner
             ProcessorSpinner(
                 processors = wearablesUiState.processors,
                 selectedProcessorId = wearablesUiState.selectedProcessorId,
                 onProcessorSelected = onProcessorSelected,
-                enabled = wearablesUiState.processors.isNotEmpty()
+                enabled = wearablesUiState.processors.isNotEmpty(),
             )
 
-            // Response text display
             if (streamUiState.responseText.isNotBlank()) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(8.dp))
                         .background(Color.Black.copy(alpha = 0.7f))
-                        .padding(12.dp)
+                        .padding(12.dp),
                 ) {
                     Text(
                         text = streamUiState.responseText,
                         color = Color.White,
                         style = MaterialTheme.typography.bodyMedium,
                         maxLines = 3,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
 
-
-            // Error message
             streamUiState.errorMessage?.let { error ->
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(8.dp))
                         .background(AppColor.Red.copy(alpha = 0.8f))
-                        .padding(12.dp)
+                        .padding(12.dp),
                 ) {
                     Text(
                         text = error,
                         color = Color.White,
-                        style = MaterialTheme.typography.bodySmall
+                        style = MaterialTheme.typography.bodySmall,
                     )
                 }
             }
         }
 
-        // Bottom controls — hidden in Reality Proxy mode so the rendered overlay
-        // (which draws its own detail panel) is fully visible.
+        // Bottom controls — hidden during Reality Proxy (PanoramaOverlay renders its own exit button)
         if (streamUiState.captureButtonMode != CaptureButtonMode.PROXY_ACTIVE) Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -394,135 +236,92 @@ fun StreamScreenContent(
                 .padding(horizontal = 16.dp)
                 .navigationBarsPadding()
                 .padding(bottom = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // Main control buttons row
+            // Row 1: Stop | Timer | Capture
             Row(
                 modifier = Modifier.fillMaxWidth().height(56.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // Stop/Back button
                 SwitchButton(
                     label = stringResource(R.string.stop_stream_button_title),
                     onClick = onStopStream,
                     isDestructive = true,
                     modifier = Modifier.weight(1f),
                 )
-
-                // Timer button
-                TimerButton(
-                    timerMode = streamUiState.timerMode,
-                    onClick = onCycleTimerMode,
-                )
-
-                // Photo capture button (icon/color reflect current processor phase)
-                CaptureButton(
-                    mode = streamUiState.captureButtonMode,
-                    onClick = onCapturePhoto,
-                )
+                TimerButton(timerMode = streamUiState.timerMode, onClick = onCycleTimerMode)
+                CaptureButton(mode = streamUiState.captureButtonMode, onClick = onCapturePhoto)
             }
 
-            // Server streaming and audio control row
+            // Row 2: Server streaming | Audio streaming | [gallery] | Mute
             Row(
                 modifier = Modifier.fillMaxWidth().height(48.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // Server streaming toggle
                 Button(
                     onClick = onToggleServerStreaming,
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = if (streamUiState.isStreamingToServer) {
-                            AppColor.Red
-                        } else {
-                            AppColor.Green
-                        }
-                    )
+                        containerColor = if (streamUiState.isStreamingToServer) AppColor.Red else AppColor.Green,
+                    ),
                 ) {
                     Icon(
-                        imageVector = if (streamUiState.isStreamingToServer) {
-                            Icons.Default.CloudOff
-                        } else {
-                            Icons.Default.CloudUpload
-                        },
+                        imageVector = if (streamUiState.isStreamingToServer) Icons.Default.CloudOff else Icons.Default.CloudUpload,
                         contentDescription = null,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(20.dp),
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = if (streamUiState.isStreamingToServer) "Stop Processing" else "Start Processing",
-                        maxLines = 1
+                        maxLines = 1,
                     )
                 }
 
-                // Audio streaming toggle
                 Button(
                     onClick = onToggleAudioStreaming,
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = if (streamUiState.isAudioStreaming) {
-                            AppColor.Red
-                        } else {
-                            AppColor.DeepBlue
-                        }
-                    )
+                        containerColor = if (streamUiState.isAudioStreaming) AppColor.Red else AppColor.DeepBlue,
+                    ),
                 ) {
                     Icon(
-                        imageVector = if (streamUiState.isAudioStreaming) {
-                            Icons.Default.MicOff
-                        } else {
-                            Icons.Default.Mic
-                        },
+                        imageVector = if (streamUiState.isAudioStreaming) Icons.Default.MicOff else Icons.Default.Mic,
                         contentDescription = null,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(20.dp),
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = if (streamUiState.isAudioStreaming) "Stop Audio" else "Start Audio",
-                        maxLines = 1
+                        maxLines = 1,
                     )
                 }
 
-                // Saved panorama gallery picker — only relevant for Panorama processor
-                if (wearablesUiState.selectedProcessorId == PanoramaProcessor.PROCESSOR_ID) IconButton(
-                    onClick = onShowPanoramaPicker,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .background(AppColor.DeepBlue, RoundedCornerShape(8.dp))
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.PhotoLibrary,
-                        contentDescription = "Saved panoramas",
-                        tint = Color.White
-                    )
+                if (showPanoramaGallery) {
+                    PanoramaGalleryButton(onClick = onShowPanoramaPicker)
                 }
 
-                // Mute TTS toggle
                 IconButton(
                     onClick = onToggleMute,
                     modifier = Modifier
                         .size(48.dp)
                         .background(
                             if (streamUiState.isAudioMuted) Color.Gray else AppColor.DeepBlue,
-                            RoundedCornerShape(8.dp)
-                        )
+                            RoundedCornerShape(8.dp),
+                        ),
                 ) {
                     Icon(
-                        imageVector = if (streamUiState.isAudioMuted) {
-                            Icons.AutoMirrored.Filled.VolumeOff
-                        } else {
-                            Icons.AutoMirrored.Filled.VolumeUp
-                        },
+                        imageVector = if (streamUiState.isAudioMuted) Icons.AutoMirrored.Filled.VolumeOff
+                                      else Icons.AutoMirrored.Filled.VolumeUp,
                         contentDescription = if (streamUiState.isAudioMuted) "Unmute" else "Mute",
-                        tint = Color.White
+                        tint = Color.White,
                     )
                 }
             }
         }
 
-        // Countdown timer display
+        // Countdown timer
         streamUiState.remainingTimeSeconds?.let { seconds ->
             val minutes = seconds / 60
             val remainingSeconds = seconds % 60
@@ -537,7 +336,7 @@ fun StreamScreenContent(
             )
         }
 
-        // Voice transcript display (tiny text at very bottom)
+        // Voice transcript
         if (streamUiState.isVoiceListening || streamUiState.voiceTranscript.isNotEmpty()) {
             Text(
                 text = streamUiState.voiceTranscript.ifEmpty { "🎤 listening..." },
@@ -551,23 +350,6 @@ fun StreamScreenContent(
                 textAlign = TextAlign.Center,
             )
         }
-
-        // Floating exit button — only visible in Reality Proxy mode (bottom controls are
-        // hidden there, so we render the yellow ✕ button as a standalone overlay).
-        if (streamUiState.captureButtonMode == CaptureButtonMode.PROXY_ACTIVE) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .navigationBarsPadding()
-                    .padding(bottom = 16.dp)
-                    .size(56.dp)
-            ) {
-                CaptureButton(
-                    mode = CaptureButtonMode.PROXY_ACTIVE,
-                    onClick = onCapturePhoto,
-                )
-            }
-        }
     }
 
     // Photo share dialog
@@ -576,15 +358,12 @@ fun StreamScreenContent(
             SharePhotoDialog(
                 photo = photo,
                 onDismiss = onHideShareDialog,
-                onShare = { bitmap ->
-                    onSharePhoto(bitmap)
-                    onHideShareDialog()
-                },
+                onShare = { bitmap -> onSharePhoto(bitmap); onHideShareDialog() },
             )
         }
     }
 
-    // Saved panorama picker dialog
+    // Panorama picker dialog
     if (streamUiState.showPanoramaPicker) {
         PanoramaPickerDialog(
             panoramas = streamUiState.savedPanoramas,
@@ -601,7 +380,6 @@ private fun StreamScreenPreview() {
     StreamScreenContent(
         streamUiState = StreamUiState(),
         wearablesUiState = WearablesUiState(),
-        onStartStream = {},
         onStopStream = {},
         onProcessorSelected = {},
         onToggleServerStreaming = {},
@@ -619,105 +397,24 @@ private fun StreamScreenPreview() {
 }
 
 @Composable
-private fun PanoramaPickerDialog(
-    panoramas: List<SavedPanorama>,
-    onSelect: (String) -> Unit,
-    onDelete: (String) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val dateFormat = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
-    androidx.compose.material3.AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Saved Panoramas") },
-        text = {
-            if (panoramas.isEmpty()) {
-                Text(
-                    text = "No saved panoramas yet.\nComplete a panorama sweep to save one automatically.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.Gray,
-                )
-            } else {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(panoramas, key = { it.id }) { pano ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color.DarkGray.copy(alpha = 0.4f))
-                                .clickable { onSelect(pano.id) }
-                                .padding(8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            // Thumbnail
-                            pano.thumbnailBitmap?.let { thumb ->
-                                Image(
-                                    bitmap = thumb.asImageBitmap(),
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .size(width = 96.dp, height = 54.dp)
-                                        .clip(RoundedCornerShape(4.dp)),
-                                    contentScale = ContentScale.Crop,
-                                )
-                            } ?: Box(
-                                modifier = Modifier
-                                    .size(width = 96.dp, height = 54.dp)
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(Color.Gray.copy(alpha = 0.5f))
-                            )
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = dateFormat.format(Date(pano.timestamp)),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = Color.White,
-                                )
-                                Text(
-                                    text = "${pano.nodeCount} region${if (pano.nodeCount == 1) "" else "s"}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color.Gray,
-                                )
-                            }
-                            androidx.compose.material3.IconButton(
-                                onClick = { onDelete(pano.id) },
-                                modifier = Modifier.size(36.dp),
-                            ) {
-                                androidx.compose.material3.Icon(
-                                    imageVector = Icons.Default.Delete,
-                                    contentDescription = "Delete",
-                                    tint = Color.Red.copy(alpha = 0.8f),
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Close") }
-        },
-    )
-}
-
-@Composable
 private fun StatusChip(
     label: String,
     isActive: Boolean,
     activeColor: Color,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
 ) {
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
             .background(
-                if (isActive) activeColor.copy(alpha = 0.3f)
-                else Color.Gray.copy(alpha = 0.3f)
+                if (isActive) activeColor.copy(alpha = 0.3f) else Color.Gray.copy(alpha = 0.3f),
             )
-            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .padding(horizontal = 12.dp, vertical = 4.dp),
     ) {
         Text(
             text = label,
             color = if (isActive) activeColor else Color.Gray,
-            style = MaterialTheme.typography.labelSmall
+            style = MaterialTheme.typography.labelSmall,
         )
     }
 }

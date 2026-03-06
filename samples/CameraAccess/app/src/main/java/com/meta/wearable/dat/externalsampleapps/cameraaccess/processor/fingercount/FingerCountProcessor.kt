@@ -20,7 +20,7 @@ import kotlinx.coroutines.withContext
  * On-device finger counting processor using MediaPipe Hand Landmarks.
  * Mirrors the server-side finger_count_processor.py logic.
  */
-class FingerCountProcessor : OnDeviceProcessor {
+class FingerCountProcessor : OnDeviceProcessor() {
     companion object {
         private const val TAG = "FingerCountProcessor"
         private const val MODEL_ASSET = "hand_landmarker.task"

@@ -25,7 +25,7 @@ import java.nio.channels.FileChannel
  * On-device object detection processor using RF-DETR via TFLite.
  * Mirrors the server-side scene_object_processor.py logic.
  */
-class ObjectDetectionProcessor : OnDeviceProcessor {
+class ObjectDetectionProcessor : OnDeviceProcessor() {
     companion object {
         private const val TAG = "ObjectDetectionProcessor"
         private const val MODEL_FILE = "models/rf_detr.tflite"

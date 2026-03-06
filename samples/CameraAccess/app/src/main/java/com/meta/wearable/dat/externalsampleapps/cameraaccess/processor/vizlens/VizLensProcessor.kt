@@ -36,7 +36,7 @@ import kotlinx.coroutines.withContext
  *    If homography fails (camera moved too far), bboxes freeze and user must say "rescan".
  * 3. Finger Intersection: Track fingertip and check bbox intersection → TTS
  */
-class VizLensProcessor : OnDeviceProcessor {
+class VizLensProcessor : OnDeviceProcessor() {
     companion object {
         private const val TAG = "VizLensProcessor"
         private const val MODEL_ASSET = "hand_landmarker.task"

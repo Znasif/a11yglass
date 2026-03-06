@@ -15,7 +15,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import java.io.File
 import java.io.FileOutputStream
@@ -26,7 +25,7 @@ import java.net.URL
  * On-device scene description processor using FastVLM-0.5B via LiteRT-LM.
  * Mirrors the server-side fast_processor.py logic.
  */
-class SceneDescriptionProcessor : OnDeviceProcessor {
+class SceneDescriptionProcessor : OnDeviceProcessor() {
     companion object {
         private const val TAG = "SceneDescProcessor"
         private const val MODEL_FILENAME = "FastVLM-0.5B.litertlm"
@@ -50,10 +49,9 @@ class SceneDescriptionProcessor : OnDeviceProcessor {
     private var appContext: Context? = null
     
     private val downloadScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val inferenceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    
-    // Frame dropping: skip frames while inference is running
-    private val isProcessing = AtomicBoolean(false)
+
+    // Frame dropping: skip frames while inference is running; latestResult caches
+    // the last completed result to display during subsequent dropped frames.
     private val latestResult = AtomicReference<OnDeviceProcessorResult?>(null)
 
     override fun initialize(context: Context) {

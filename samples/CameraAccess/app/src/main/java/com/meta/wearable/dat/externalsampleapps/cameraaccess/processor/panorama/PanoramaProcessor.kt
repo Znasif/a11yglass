@@ -10,11 +10,8 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceP
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessorResult
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.florence.FlorenceProcessor
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.vizlens.FeatureTracker
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -50,7 +47,7 @@ import kotlinx.coroutines.withContext
  * - `AtomicBoolean isProcessing` drops concurrent frames to avoid queuing.
  * - `processorScope` runs hierarchy building independently of the localProcessingJob.
  */
-class PanoramaProcessor : OnDeviceProcessor {
+class PanoramaProcessor : OnDeviceProcessor() {
 
     companion object {
         private const val TAG = "PanoramaProcessor"
@@ -86,9 +83,6 @@ class PanoramaProcessor : OnDeviceProcessor {
         florenceProcessor = fp
     }
 
-    // Long-lived scope for hierarchy building — survives localProcessingJob cancellation.
-    private val processorScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-
     // ── Hierarchy-ready signal ────────────────────────────────────────────────
     // Emits true once Florence / fallback hierarchy completes after stitching.
     // StreamViewModel collects this to activate the Explore button.
@@ -102,7 +96,6 @@ class PanoramaProcessor : OnDeviceProcessor {
     val localizedXFraction: StateFlow<Float> = _localizedXFraction.asStateFlow()
 
     // ── Concurrency guards ───────────────────────────────────────────────────
-    private val isProcessing = AtomicBoolean(false)
     @Volatile private var startRequested         = false
     @Volatile private var stopRequested          = false
     @Volatile private var realityProxyRequested  = false

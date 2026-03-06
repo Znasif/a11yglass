@@ -8,7 +8,7 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceP
 /**
  * A simple pass-through processor that returns the original frame.
  */
-class BasicProcessor : OnDeviceProcessor {
+class BasicProcessor : OnDeviceProcessor() {
     override val id = -100
     override val name = "Basic (On-Device)"
     override val description = "Pass-through processor - returns the original image"

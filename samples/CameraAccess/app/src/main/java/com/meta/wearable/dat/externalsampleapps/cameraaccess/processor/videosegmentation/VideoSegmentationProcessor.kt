@@ -11,7 +11,6 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceP
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessorResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Video Object Segmentation Processor using XMem (Track Anything).
@@ -25,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Voice commands: "track" / "track this" → start, "stop tracking" / "stop" → stop
  */
-class VideoSegmentationProcessor : OnDeviceProcessor {
+class VideoSegmentationProcessor : OnDeviceProcessor() {
     companion object {
         private const val TAG = "VideoSegProcessor"
 
@@ -45,8 +44,6 @@ class VideoSegmentationProcessor : OnDeviceProcessor {
     override val description = "Track and segment objects using XMem"
 
     private var xmemTracker: XMemTracker? = null
-    private var isProcessing = AtomicBoolean(false)
-
     // State machine
     enum class TrackingState {
         IDLE,                  // Waiting for user trigger
