@@ -13,6 +13,7 @@
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.ui
 
+import android.graphics.Bitmap
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.Image
@@ -20,26 +21,36 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.NODE_COLORS
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.POINTING_FRACTION
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.CaptureButtonMode
-import me.saket.telephoto.zoomable.rememberZoomableState
-import me.saket.telephoto.zoomable.zoomable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.border
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.input.pointer.pointerInput
+
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -55,7 +66,6 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.R
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.StreamViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.components.ProcessorSpinner
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
-import android.graphics.Bitmap
 import androidx.compose.ui.tooling.preview.Preview
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.StreamUiState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesUiState
@@ -122,43 +132,119 @@ fun StreamScreenContent(
     onDeleteSavedPanorama: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // Zoomable state for the panorama result viewer. Declared unconditionally per
-    // Compose rules; only wired up when captureButtonMode == PANORAMA_DONE / ANALYZING.
-    val panoramaZoomState = rememberZoomableState()
+    // Manual pan position for PANORAMA_ANALYZING / PANORAMA_DONE phases.
+    // Reset to centre whenever a new panorama is loaded.
+    var manualXFraction by remember { mutableStateOf(0.5f) }
+    LaunchedEffect(streamUiState.carouselPanorama) { manualXFraction = 0.5f }
+
+    val isCarouselMode = streamUiState.captureButtonMode in listOf(
+        CaptureButtonMode.PANORAMA_ANALYZING,
+        CaptureButtonMode.PANORAMA_DONE,
+        CaptureButtonMode.PROXY_ACTIVE,
+    )
 
     Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
-        // Video frame display (prefer processed frame if streaming to server)
-        streamUiState.displayFrame?.let { frame ->
-            when (streamUiState.captureButtonMode) {
-                CaptureButtonMode.PANORAMA_ANALYZING,
-                CaptureButtonMode.PANORAMA_DONE -> {
-                    // Stitched panorama: full pan/pinch-zoom viewer
+        if (isCarouselMode) {
+            // ── Panorama image viewer (post-stitch phases) ──────────────────────
+            // During PROXY_ACTIVE the localizer drives xFraction; otherwise the
+            // user pans with a horizontal swipe. ContentScale.FillHeight keeps the
+            // panorama at its natural aspect ratio filling screen height; BiasAlignment
+            // scrolls the visible slice without requiring bitmap copies.
+            streamUiState.carouselPanorama?.let { panorama ->
+                val xFraction = if (streamUiState.captureButtonMode == CaptureButtonMode.PROXY_ACTIVE)
+                    streamUiState.carouselXFraction else manualXFraction
+
+                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                    // Panorama image
                     Image(
-                        bitmap = frame.asImageBitmap(),
-                        contentDescription = stringResource(R.string.live_stream),
-                        modifier = Modifier.fillMaxSize().zoomable(panoramaZoomState),
-                        contentScale = ContentScale.Fit,
+                        bitmap = panorama.asImageBitmap(),
+                        contentDescription = null,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(Unit) {
+                                detectHorizontalDragGestures { _, dragAmount ->
+                                    manualXFraction = (manualXFraction - dragAmount / size.width * 2f)
+                                        .coerceIn(0f, 1f)
+                                }
+                            },
+                        contentScale = ContentScale.FillHeight,
+                        alignment = BiasAlignment(
+                            horizontalBias = 2f * xFraction - 1f,
+                            verticalBias = 0f,
+                        ),
                     )
+
+                    // ── Coordinate mapping ──────────────────────────────────────
+                    // displayedW: width of the panorama when its height fills the screen.
+                    // viewOffsetX: screen-space x position of the panorama's left edge
+                    //              (negative when panorama is wider than the screen).
+                    val displayedW: Dp = maxHeight * panorama.width / panorama.height
+                    val viewOffsetX: Dp = (maxWidth - displayedW) * xFraction
+
+                    // ── Hierarchy node overlay buttons ──────────────────────────
+                    streamUiState.hierarchyNodes.forEachIndexed { idx, node ->
+                        val centerX = viewOffsetX + displayedW * node.panoramaXFraction
+                        val nodeW   = maxOf(displayedW * node.panoramaWidthFraction, 72.dp)
+                        val left    = centerX - nodeW / 2
+                        // Skip nodes entirely off-screen to avoid wasting measure passes.
+                        if (left > maxWidth || left + nodeW < 0.dp) return@forEachIndexed
+                        val centerY = maxHeight * node.panoramaYFraction
+                        val nodeH   = 36.dp
+                        val top     = (centerY - nodeH / 2).coerceIn(0.dp, maxHeight - nodeH)
+                        val color   = Color(NODE_COLORS[idx % NODE_COLORS.size])
+                        Box(
+                            modifier = Modifier
+                                .offset(x = left, y = top)
+                                .size(nodeW, nodeH)
+                                .border(1.dp, Color.White.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(color.copy(alpha = 0.75f))
+                                .clickable { manualXFraction = node.panoramaXFraction }
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = node.label,
+                                color = Color.White,
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+
+                    // ── Reality Proxy: live camera cutout in screen centre ───────
+                    if (streamUiState.captureButtonMode == CaptureButtonMode.PROXY_ACTIVE) {
+                        streamUiState.videoFrame?.let { live ->
+                            val cutoutW = maxWidth * POINTING_FRACTION
+                            val cutoutH = cutoutW * live.height / live.width
+                            Box(
+                                modifier = Modifier
+                                    .size(cutoutW, cutoutH)
+                                    .align(Alignment.Center)
+                                    .border(2.dp, Color.White, RoundedCornerShape(4.dp))
+                                    .clip(RoundedCornerShape(4.dp)),
+                            ) {
+                                Image(
+                                    bitmap = live.asImageBitmap(),
+                                    contentDescription = null,
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop,
+                                )
+                            }
+                        }
+                    }
                 }
-                CaptureButtonMode.PROXY_ACTIVE -> {
-                    // Reality Proxy: renderer draws its own overlay (no touch zoom;
-                    // head movement is the navigation modality)
-                    Image(
-                        bitmap = frame.asImageBitmap(),
-                        contentDescription = stringResource(R.string.live_stream),
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Fit,
-                    )
-                }
-                else -> {
-                    // Live camera feed or in-progress processor overlay
-                    Image(
-                        bitmap = frame.asImageBitmap(),
-                        contentDescription = stringResource(R.string.live_stream),
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Inside,
-                    )
-                }
+            }
+        } else {
+            // ── Live camera feed or in-progress processor overlay ───────────────
+            streamUiState.displayFrame?.let { frame ->
+                Image(
+                    bitmap = frame.asImageBitmap(),
+                    contentDescription = stringResource(R.string.live_stream),
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Inside,
+                )
             }
         }
 
@@ -380,9 +466,9 @@ fun StreamScreenContent(
                 ) {
                     Icon(
                         imageVector = if (streamUiState.isAudioMuted) {
-                            Icons.Default.VolumeOff
+                            Icons.AutoMirrored.Filled.VolumeOff
                         } else {
-                            Icons.Default.VolumeUp
+                            Icons.AutoMirrored.Filled.VolumeUp
                         },
                         contentDescription = if (streamUiState.isAudioMuted) "Unmute" else "Mute",
                         tint = Color.White

@@ -66,11 +66,10 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.sample
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.Dispatchers
 import androidx.annotation.OptIn
-import kotlinx.coroutines.FlowPreview
 
 class StreamViewModel(
     application: Application,
@@ -110,6 +109,7 @@ class StreamViewModel(
     private var frameStreamingJob: Job? = null
     private var localProcessingJob: Job? = null
     private var hierarchyReadyJob: Job? = null
+    private var localizationJob: Job? = null
 
     // Frame streaming state
     // Use SharedFlow with replay=1 and DROP_OLDEST to ensure we always have the latest frame available
@@ -260,7 +260,6 @@ class StreamViewModel(
      * Start streaming frames for processing.
      * Routes to on-device or server processing based on selected processor.
      */
-    @OptIn(FlowPreview::class)
     fun startServerStreaming() {
         if (_uiState.value.isStreamingToServer) {
             Log.w(TAG, "Already streaming")
@@ -279,7 +278,6 @@ class StreamViewModel(
     /**
      * Start processing frames locally using an on-device processor.
      */
-    @OptIn(FlowPreview::class)
     private fun startLocalProcessing(processorId: Int) {
         val processor = OnDeviceProcessorManager.getProcessor(processorId)
         if (processor == null) {
@@ -295,19 +293,16 @@ class StreamViewModel(
         }
 
         localProcessingJob = viewModelScope.launch(Dispatchers.Default) {
-            var flow: kotlinx.coroutines.flow.Flow<Bitmap> = _videoFrameFlow.asSharedFlow()
-
-            if (FRAME_DELAY_MS > 0) {
-                flow = flow.sample(FRAME_DELAY_MS)
-            }
-
-            flow.collect { bitmap ->
+            _videoFrameFlow.asSharedFlow().conflate().collect { bitmap ->
+                delay(FRAME_DELAY_MS)
                 if (_uiState.value.isStreamingToServer) {
                     try {
                         val result = processor.process(bitmap)
                         handleLocalProcessorResult(result)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e  // never swallow coroutine cancellation
                     } catch (e: Exception) {
-                        Log.e(TAG, "Local processing error: ${e.message}")
+                        Log.e(TAG, "Local processing error: ${e.message}", e)
                     } catch (e: OutOfMemoryError) {
                         Log.e(TAG, "OOM in local processor — freeing memory and stopping")
                         System.gc()
@@ -412,6 +407,12 @@ class StreamViewModel(
 
         hierarchyReadyJob?.cancel()
         hierarchyReadyJob = viewModelScope.launch {
+            // Load the raw stitch into the carousel immediately so it's visible during
+            // PANORAMA_ANALYZING while Florence runs in the background.
+            pp.stitchedResult?.let { _uiState.update { s ->
+                s.copy(carouselPanorama = it, carouselAngularSpanDeg = pp.panoramaAngularSpanDeg)
+            } }
+
             val startMs = System.currentTimeMillis()
             var lastAnnounceMs = startMs
             var firstAnnounced = false
@@ -433,13 +434,14 @@ class StreamViewModel(
                 delay(1_000L)
             }
 
-            // Hierarchy is ready — activate the Explore button and apply colored overlays.
+            // Hierarchy is ready — activate the Explore button and load panorama into carousel.
             val n = pp.hierarchyNodeCount
-            val annotated = pp.buildAnnotatedPanorama()
             _uiState.update { state ->
                 state.copy(
-                    captureButtonMode = CaptureButtonMode.PANORAMA_DONE,
-                    processedFrame = annotated ?: state.processedFrame,
+                    captureButtonMode      = CaptureButtonMode.PANORAMA_DONE,
+                    carouselPanorama       = pp.stitchedResult,
+                    carouselAngularSpanDeg = pp.panoramaAngularSpanDeg,
+                    hierarchyNodes         = pp.hierarchyNodes,
                 )
             }
             announceText("Panorama ready — $n region${if (n == 1) "" else "s"} found")
@@ -487,10 +489,11 @@ class StreamViewModel(
             pp.loadAndAnalyzePanorama(bitmap)
 
             _uiState.update { it.copy(
-                processedFrame     = bitmap,
-                captureButtonMode  = CaptureButtonMode.PANORAMA_ANALYZING,
-                showPanoramaPicker = false,
-                statusMessage      = "Re-analyzing saved panorama…",
+                carouselPanorama       = bitmap,
+                carouselAngularSpanDeg = pp.panoramaAngularSpanDeg,
+                captureButtonMode      = CaptureButtonMode.PANORAMA_ANALYZING,
+                showPanoramaPicker     = false,
+                statusMessage          = "Re-analyzing saved panorama…",
             ) }
 
             // Reuse the same watcher that drives the Explore button after a live sweep.
@@ -521,7 +524,6 @@ class StreamViewModel(
     /**
      * Start streaming frames to the remote server.
      */
-    @OptIn(FlowPreview::class)
     private fun startRemoteStreaming() {
         if (!wearablesViewModel.serverRepository.isConnected()) {
             _uiState.update { it.copy(errorMessage = "Not connected to server") }
@@ -536,13 +538,8 @@ class StreamViewModel(
         }
 
         frameStreamingJob = viewModelScope.launch(Dispatchers.Default) {
-             var flow: kotlinx.coroutines.flow.Flow<Bitmap> = _videoFrameFlow.asSharedFlow()
-
-             if (FRAME_DELAY_MS > 0) {
-                 flow = flow.sample(FRAME_DELAY_MS)
-             }
-
-             flow.collect { bitmap ->
+             _videoFrameFlow.asSharedFlow().conflate().collect { bitmap ->
+                 delay(FRAME_DELAY_MS)
                  if (_uiState.value.isStreamingToServer) {
                      sendFrameToServer(bitmap)
                  }
@@ -826,8 +823,10 @@ class StreamViewModel(
                 processor.phase == com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaPhase.REALITY_PROXY -> {
                     // ── Exit Reality Proxy ───────────────────────────────────
                     Log.d(TAG, "Panorama: exiting Reality Proxy")
+                    localizationJob?.cancel()
+                    localizationJob = null
                     processor.exitRealityProxy()
-                    finishPanoramaCapture()   // cancels localProcessingJob, preserves processedFrame
+                    finishPanoramaCapture()   // cancels localProcessingJob, preserves carousel
                     // Hierarchy was already built before entering RP — restore DONE state directly.
                     _uiState.update { it.copy(
                         captureButtonMode = CaptureButtonMode.PANORAMA_DONE,
@@ -841,6 +840,14 @@ class StreamViewModel(
                     resumeVideoCapture()   // restart camera feed (was paused after stitch)
                     if (!_uiState.value.isStreamingToServer) startServerStreaming()
                     processor.enterRealityProxy()
+                    // Collect xFraction from the processor and push into uiState so the
+                    // UI pans the panorama image to the localizer's position each frame.
+                    localizationJob?.cancel()
+                    localizationJob = viewModelScope.launch {
+                        processor.localizedXFraction.collect { fraction ->
+                            _uiState.update { it.copy(carouselXFraction = fraction) }
+                        }
+                    }
                     _uiState.update { it.copy(
                         statusMessage = "Reality Proxy — look at objects",
                         captureButtonMode = CaptureButtonMode.PROXY_ACTIVE,
@@ -852,10 +859,11 @@ class StreamViewModel(
                     Log.d(TAG, "Panorama: starting sweep")
                     hierarchyReadyJob?.cancel()
                     hierarchyReadyJob = null
-                    // Clear the previous stitch from processedFrame BEFORE state.reset() runs,
-                    // then hint GC to release the potentially 200+ MB stitch bitmap before
-                    // the new session starts allocating keyframe copies.
-                    _uiState.update { it.copy(processedFrame = null) }
+                    localizationJob?.cancel()
+                    localizationJob = null
+                    // Clear the previous carousel panorama and hint GC to release the
+                    // potentially 200+ MB stitch bitmap before the new session allocates.
+                    _uiState.update { it.copy(processedFrame = null, carouselPanorama = null) }
                     System.gc()
                     if (!_uiState.value.isStreamingToServer) startServerStreaming()
                     processor.startPanorama()

@@ -46,7 +46,15 @@ class PanoramaLocalizer {
      * Slice [panorama] into overlapping strips of [stripWidthPx] width (stride = stripW/2).
      * Call once on entering REALITY_PROXY.
      */
-    fun initialize(panorama: Bitmap, stripWidthPx: Int) {
+    /**
+     * Slice [panorama] into overlapping strips of [stripWidthPx] × [frameHeight] pixels.
+     *
+     * [frameHeight] must match the live camera frame height so both the strip and the
+     * live frame normalise to the same dimensions inside FeatureTracker, eliminating the
+     * y-scale mismatch that would otherwise break feature matching.
+     * The strip is centre-cropped vertically from the panorama.
+     */
+    fun initialize(panorama: Bitmap, stripWidthPx: Int, frameHeight: Int = panorama.height) {
         strips.forEach { it.bitmap.recycle() }
         strips.clear()
         lastBestIdx       = -1
@@ -54,20 +62,25 @@ class PanoramaLocalizer {
         lastKnownFraction = null
         this.stripWidthPx = stripWidthPx.coerceIn(1, panorama.width)
 
+        // Centre-crop the panorama vertically to match the live frame height.
+        val cropH  = frameHeight.coerceIn(1, panorama.height)
+        val yOffset = (panorama.height - cropH) / 2
+
         val stride = (this.stripWidthPx / 2).coerceAtLeast(1)
         var x = 0
         while (x + this.stripWidthPx <= panorama.width) {
             strips.add(Strip(
-                bitmap        = Bitmap.createBitmap(panorama, x, 0, this.stripWidthPx, panorama.height),
+                bitmap        = Bitmap.createBitmap(panorama, x, yOffset, this.stripWidthPx, cropH),
                 startX        = x,
                 panoramaWidth = panorama.width
             ))
             x += stride
         }
         if (strips.isEmpty()) {
-            strips.add(Strip(panorama.copy(Bitmap.Config.ARGB_8888, false), 0, panorama.width))
+            val crop = Bitmap.createBitmap(panorama, 0, yOffset, panorama.width, cropH)
+            strips.add(Strip(crop, 0, panorama.width))
         }
-        Log.d(TAG, "Initialized: ${strips.size} strips × ${this.stripWidthPx}px " +
+        Log.d(TAG, "Initialized: ${strips.size} strips × ${this.stripWidthPx}×${cropH}px " +
             "from ${panorama.width}×${panorama.height} panorama")
     }
 

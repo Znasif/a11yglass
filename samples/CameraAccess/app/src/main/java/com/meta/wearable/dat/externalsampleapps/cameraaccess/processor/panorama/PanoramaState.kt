@@ -146,6 +146,9 @@ class PanoramaState {
     var localizedAngleDeg: Float = 0f
     var focusedNode: HierarchyNode? = null
 
+    /** Angular span (degrees) of the stitched panorama. Set after stitching or panorama load. */
+    var panoramaAngularSpanDeg: Float = 65f
+
     fun reset() {
         phase = PanoramaPhase.IDLE
         currentAngleDeg = 0f
@@ -158,6 +161,7 @@ class PanoramaState {
         lastAcceptedFrame?.let { if (!it.isRecycled) it.recycle() }
         lastAcceptedFrame = null
         skippedCount = 0
+        panoramaAngularSpanDeg = 65f
         // Do NOT recycle stitchedResult here — StreamUiState.processedFrame may still
         // hold a reference to the same bitmap, and Compose would crash drawing a recycled
         // bitmap. The UI clears processedFrame first (in capturePhoto), after which the

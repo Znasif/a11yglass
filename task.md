@@ -1,454 +1,335 @@
 # Task: Panorama → Reality Proxy Mode Extension
 
-## Goal
+---
 
-Extend `PanoramaProcessor` from a two-phase pipeline (capture + stitch) into a **three-phase pipeline**:
+## Phase A — COMPLETED (original three-phase pipeline)
 
-```
-Phase 1: CAPTURE        → user sweeps camera, keyframes collected via SuperPoint+LightGlue
-Phase 2: STITCH         → post-hoc composite panorama (existing, unchanged)
-Phase 3: REALITY PROXY  → interactive: live center-square tracks position in panorama,
-                          pre-derived hierarchy revealed on gaze
-```
+The following has been implemented and is on the `on_device` branch:
 
-After stitching completes, pressing the camera button enters Reality Proxy mode. The stitched panorama is shown full-screen with the object hierarchy overlaid as labeled bounding regions. A center reticle tracks where the live camera is pointing by matching each live frame against the stored keyframes (HLOC-style, using the existing SuperPoint+LightGlue `FeatureTracker`). The region under the reticle is highlighted and its description panel is shown at the bottom. No hand gestures — center square is the sole interaction modality.
+- `PanoramaPhase` enum (IDLE, CAPTURING, STITCHING, HIERARCHY_BUILDING, REALITY_PROXY)
+- `HierarchyNode.kt` data class
+- `PanoramaHierarchyBuilder.kt` — builds from keyframes or Florence regions; `findNodeAt()`
+- `PanoramaLocalizer.kt` — absolute xFraction localization against full stitched panorama
+- `RealityProxyRenderer.kt` — canvas-based bitmap renderer (to be replaced in Phase B)
+- `StripRenderer.kt` — Phase 1 live strip preview (retained as-is)
+- `PanoramaProcessor.kt` — full three-phase process() loop, processorScope, @Volatile flags
+- `PanoramaSaveManager.kt` — save/load panoramas to external storage
+- `FlorenceProcessor.kt` — semantic region detection (WebGPU WebView, correct fp16/q4 dtypes)
+- `StreamViewModel.kt` — hierarchy watcher, TTS guidance, capturePhoto() 4-way branch
+
+**Correction from original plan:**
+`PanoramaLocalizer` was originally designed as keyframe-chaining (relative). It was implemented
+as absolute xFraction localization against the full stitched panorama (matches against a strip
+of the panorama bitmap). This is strictly better — failed frames produce stale-but-correct
+position rather than accumulated drift. The carousel in Phase B depends on this being absolute.
 
 ---
 
-## State Machine
+## Phase B — IN PROGRESS: Carousel WebView Renderer
 
-Add to `PanoramaState.kt`:
+### Goal
+
+Replace all post-stitch rendering (annotated bitmap stitch view, RealityProxyRenderer bitmap)
+with a Three.js WebView carousel. The stitched panorama is rendered as the inside of a
+cylinder. The camera sits at the origin. PanoramaLocalizer drives cylinder rotation so the
+correct part of the panorama is always centred. Depth-Pro displacement is stubbed until the
+pipeline is available.
+
+Node overlays become native Android accessibility buttons positioned by angle — not canvas
+drawing. This makes the panorama fully navigable by blind users via TalkBack swipe gestures.
+
+### Rendering Phase Map
+
+| Phase | Renderer | Notes |
+|---|---|---|
+| CAPTURING | StripRenderer → Bitmap | Unchanged — still overlaid on live frame |
+| STITCHING | Loading indicator (UI state only) | No bitmap output |
+| IDLE (post-stitch) | WebView carousel, static rotation | Replaces annotated bitmap |
+| REALITY_PROXY | WebView carousel, localizer-driven rotation | Same WebView, localization on |
+| PANORAMA_DONE | WebView carousel, static rotation | Loaded saved panorama |
+
+IDLE and REALITY_PROXY are the same WebView — the only difference is whether
+`CarouselWebViewManager.setAngle()` is being called each frame.
+
+### Layer Stack (all post-stitch phases)
+
+```
+Compose Box (full frame)
+├── AndroidView → WebView          Three.js carousel, full frame, pinch-to-zoom inside JS
+└── Box overlay (native Compose)
+    ├── Image                      Live camera crop, centre-anchored, fixed position
+    ├── CrosshairView              Centre decoration
+    ├── NodeButtonRow              Accessible buttons positioned horizontally by angle
+    └── NodeDetailPanel            Bottom 22%, shown when a node is selected
+```
+
+### New Files
+
+---
+
+#### `app/src/main/assets/panorama_carousel.html`
+
+Single self-contained HTML. Three.js via importmap CDN (same pattern as
+`florence_inference.html`). No file system access needed.
+
+**Three.js setup:**
+- `CylinderGeometry(10, 10, 8, 512, 128, true)` — 512×128 segments for smooth depth
+  displacement; `openEnded: true`
+- `geometry.rotateX(Math.PI / 2)` — cylinder axis aligned to Z
+- `MeshStandardMaterial { side: THREE.BackSide }` — renders inside of cylinder
+- Camera at origin, `camera.up = (0, 0, 1)`, looking along −Y
+- `AmbientLight` only — no shadows needed
+- `displacementMap` slot present, `displacementScale = -2.0` (white = near, pushed inward)
+- Pinch-to-zoom via `touchstart`/`touchmove` on `renderer.domElement` — no OrbitControls,
+  no Kotlin bridge involvement. `camera.fov` clamped 20–110°.
+
+**JavaScript API (called from Kotlin via `evaluateJavascript`):**
+
+```javascript
+loadPanorama(base64DataUrl)    // set cylinder colour texture; resets zoom to default FOV
+loadDepthMap(base64DataUrl)    // set displacement texture; no-op until Depth-Pro ready
+setAngle(radians)              // carousel.rotation.z = radians
+setZoom(fovDeg)                // camera.fov = clamp(fovDeg, 20, 110); updateProjectionMatrix
+```
+
+---
+
+#### `processor/panorama/CarouselWebViewManager.kt`
+
+Owns WebView lifecycle and the Kotlin↔JS bridge.
 
 ```kotlin
-enum class PanoramaPhase { IDLE, CAPTURING, STITCHING, HIERARCHY_BUILDING, REALITY_PROXY }
-```
+class CarouselWebViewManager {
 
-Full transition graph:
+    fun initialize(context: Context, webView: WebView)
+    // WebSettings: javaScriptEnabled, hardwareAccelerated
+    // addJavascriptInterface(this, "Android")
+    // loadUrl("file:///android_asset/panorama_carousel.html")
 
-```
-startPanorama()
-  IDLE ─────────────────────► CAPTURING
-                                  │
-                            stopPanorama()
-                                  │
-                              STITCHING  (synchronous in process(), existing)
-                                  │
-                    auto: launch hierarchyBuilder.build() in processorScope
-                                  │
-                          HIERARCHY_BUILDING  (async, processorScope)
-                                  │
-                    auto: nodes ready → state.hierarchyNodes populated
-                                  │
-                              IDLE + stitchedResult ≠ null
-                                  │
-                          capturePhoto() (2nd press)
-                                  │
-                          REALITY_PROXY  (live frame loop)
-                                  │
-                          capturePhoto() (3rd press)
-                                  │
-                              IDLE (reset, or keep stitched frozen)
+    fun loadPanorama(bitmap: Bitmap)
+    // Encode to base64 PNG on IO dispatcher
+    // evaluateJavascript("loadPanorama('data:image/png;base64,...')", null)
+
+    fun loadDepthMap(bitmap: Bitmap)
+    // Same as loadPanorama but calls loadDepthMap JS function
+
+    fun setAngle(angleDeg: Float)
+    // evaluateJavascript("setAngle(${Math.toRadians(angleDeg.toDouble())})", null)
+
+    @JavascriptInterface
+    fun onNodeTapped(nodeIndex: Int)
+    // Called from JS if node sprites are tapped directly in WebGL (optional path)
+}
 ```
 
 ---
 
-## New Files  (all in `processor/panorama/`)
+#### `ui/panorama/CarouselOverlayState.kt`
 
----
-
-### 1. `HierarchyNode.kt`
-
-Data class for one region in the pre-derived panorama hierarchy.
+Pure computation — no Android dependencies.
 
 ```kotlin
-data class HierarchyNode(
-    val label: String,
-    val angleDeg: Float,              // angular center in panorama space
-    val panoramaXFraction: Float,     // normalized 0–1 horizontal center in stitched bitmap
-    val panoramaWidthFraction: Float, // normalized 0–1 width in stitched bitmap
-    val keyframeIndex: Int,           // index into state.keyframes
-    val description: String = "",     // filled async (FastVLM) or left as angle label for v1
-    val children: List<HierarchyNode> = emptyList()
+data class VisibleNode(
+    val node: HierarchyNode,
+    val screenXFraction: Float,   // 0..1 across screen width
+    val stackDepth: Int,          // vertical stacking offset for overlapping nodes
+)
+
+fun computeVisibleNodes(
+    nodes: List<HierarchyNode>,
+    currentAngleDeg: Float,
+    hFovDeg: Float,
+): List<VisibleNode>
+```
+
+**Visibility:** a node is in view when its angular range overlaps the current FOV:
+```
+nodeMinAngle < currentAngle + hFov/2  &&  nodeMaxAngle > currentAngle - hFov/2
+```
+where `nodeMinAngle = node.angleDeg - node.panoramaWidthFraction * totalSpan / 2`
+
+**Screen X fraction:**
+```
+screenXFraction = (node.angleDeg - currentAngle) / hFov + 0.5f  // clamped 0..1
+```
+
+**Overlap:** nodes within 0.08 screen-fraction of each other get increasing `stackDepth`
+values → small vertical offset in the overlay (48dp per depth level) so they do not occlude.
+
+**Ordering:** list is sorted by `node.angleDeg` so TalkBack linear swipe traverses
+spatially left-to-right without any custom accessibility configuration.
+
+---
+
+### Modified Files
+
+---
+
+#### `processor/panorama/PanoramaProcessor.kt`
+
+- **Remove** `renderRealityProxy()` — no longer produces a bitmap for post-stitch phases
+- **Remove** `buildAnnotatedPanorama()` — node overlays are now native buttons
+- **Remove** `realityProxyRenderer` field and import
+- Post-stitch phases (IDLE, REALITY_PROXY, PANORAMA_DONE) return the raw frame or null
+  from `process()` — the image preview is no longer updated during these phases
+- **Add** `localizedAngleDeg` as `MutableStateFlow<Float>` (updated each frame in
+  REALITY_PROXY loop) so StreamViewModel can collect it and drive `setAngle()`
+- `stitchedResult` remains accessible via property for WebView loading
+- Everything else (localizer, hierarchyBuilder, processorScope, flags) unchanged
+
+```kotlin
+// New StateFlow exposure
+private val _localizedAngleDeg = MutableStateFlow(0f)
+val localizedAngleDeg: StateFlow<Float> = _localizedAngleDeg.asStateFlow()
+
+// In REALITY_PROXY loop, replace renderRealityProxy() call with:
+val xFraction = localizer?.localize(frame, featureTracker!!)
+if (xFraction != null) {
+    state.localizedAngleDeg = minAngle + xFraction * (maxAngle - minAngle)
+    _localizedAngleDeg.value = state.localizedAngleDeg
+}
+state.focusedNode = hierarchyBuilder.findNodeAt(state.localizedAngleDeg)
+return@withContext OnDeviceProcessorResult(
+    processedImage = frame,   // raw frame — UI ignores it during REALITY_PROXY
+    text = if (state.focusedNode?.label != lastAnnouncedLabel) state.focusedNode?.label else null,
+    processingTimeMs = elapsed
 )
 ```
 
-Level-0 node = root (full panorama).
-Level-1 nodes = one per keyframe (the angular slice that keyframe covers).
-Level-2 (future) = sub-object detection within each keyframe crop.
+---
+
+#### `StreamViewModel.kt`
+
+- Collect `panoramaProcessor.localizedAngleDeg` → `carouselManager.setAngle()`
+- After stitch completes (hierarchy watcher): `carouselManager.loadPanorama(stitchedResult)`
+- Compute `visibleNodes` from `hierarchyNodes + localizedAngleDeg` each frame →
+  expose as `StateFlow<List<VisibleNode>>`
+- `hFovDeg` computed once from first keyframe bitmap dimensions via `cameraHFovDeg()`
+- `startHierarchyWatcher()` TTS announcements unchanged
+- `loadAndAnalyzePanorama()` path: same — after loading, call `carouselManager.loadPanorama()`
 
 ---
 
-### 2. `PanoramaHierarchyBuilder.kt`
-
-Builds and queries the hierarchy tree from keyframes right after stitching.
+#### `ui/StreamScreen.kt`
 
 ```kotlin
-class PanoramaHierarchyBuilder {
-
-    // Populated once, then read-only during REALITY_PROXY
-    @Volatile private var nodes: List<HierarchyNode> = emptyList()
-
-    /**
-     * Build hierarchy from keyframes.
-     * Called from processorScope (background thread) immediately after stitch.
-     * panoramaWidth: width of the stitched bitmap in px.
-     */
-    fun build(keyframes: List<Keyframe>, panoramaWidth: Int): List<HierarchyNode>
-
-    /** Swap in the completed list (atomic write). */
-    fun setNodes(n: List<HierarchyNode>) { nodes = n }
-
-    /** Query: which node's angular range contains angleDeg? */
-    fun findNodeAt(angleDeg: Float): HierarchyNode?
-
-    fun clear() { nodes = emptyList() }
-}
-```
-
-**`build()` algorithm:**
-
-1. `totalSpan = maxAngle - minAngle` (from keyframes)
-2. For each keyframe `kf`:
-   - `xFraction = (kf.angleDeg - minAngle) / totalSpan`
-   - `widthFraction = CAMERA_FOV_DEGREES / totalSpan`
-   - `label = "${kf.angleDeg.toInt()}°"`  (v1 — no FastVLM yet)
-   - Construct `HierarchyNode(label, kf.angleDeg, xFraction, widthFraction, index)`
-3. Return list sorted by `angleDeg`
-
-**`findNodeAt()` algorithm:**
-
-Linear scan; return the node `n` where `|n.angleDeg - angleDeg| < CAMERA_FOV_DEGREES / 2f`.
-Ties broken by closest center.
-
-**v2 (deferred):** After `build()` returns, launch a separate coroutine that iterates nodes,
-writes each `keyframe.bitmap` to a temp file, calls FastVLM Engine (the same approach as
-`SceneDescriptionProcessor`), and updates the node's `description` field. The renderer
-shows whatever is in `description` at render time, so descriptions populate progressively.
-
----
-
-### 3. `PanoramaLocalizer.kt`
-
-HLOC-style live-to-panorama localization using the shared `FeatureTracker`.
-
-```kotlin
-class PanoramaLocalizer {
-
-    private var currentKeyframeIdx = 0
-    private var referenceAngleDeg  = 0f
-
-    /**
-     * Set initial reference keyframe (call once on entering REALITY_PROXY).
-     * Uses the midpoint keyframe as starting estimate.
-     */
-    fun initialize(keyframes: List<Keyframe>, featureTracker: FeatureTracker)
-
-    /**
-     * Match liveFrame against the current reference keyframe.
-     * Returns estimated panorama angle (degrees) of the live frame center, or null on failure.
-     * Side-effect: advances currentKeyframeIdx and updates featureTracker reference if the
-     * estimated center has drifted outside the current keyframe's angular range.
-     */
-    fun localize(
-        liveFrame: Bitmap,
-        keyframes: List<Keyframe>,
-        featureTracker: FeatureTracker
-    ): Float?
-
-    fun reset() { currentKeyframeIdx = 0; referenceAngleDeg = 0f }
-}
-```
-
-**`localize()` algorithm:**
-
-1. `H = featureTracker.computeHomography(liveFrame)` — null → return null
-2. `shiftPx = extractHorizontalShift(H, liveFrame.width, liveFrame.height)`
-   *(reuse the same math as `PanoramaProcessor.extractHorizontalShift`; move to a
-   package-level function in `PanoramaState.kt` so both classes can call it)*
-3. `estimatedAngle = referenceAngleDeg - shiftPx / liveFrame.width * CAMERA_FOV_DEGREES`
-   *(negative because camera panning right → scene shifts left → angle increases)*
-4. Boundary check: if `estimatedAngle` is more than `CAMERA_FOV_DEGREES * 0.6f` away from
-   `referenceAngleDeg`, find the nearest keyframe by angle, call
-   `featureTracker.setReferenceFrame(keyframes[newIdx].bitmap, emptyList())`, update
-   `currentKeyframeIdx` and `referenceAngleDeg`.
-5. Return `estimatedAngle` (clamped to `[minAngle, maxAngle]`)
-
-**Why this works:** `FeatureTracker` was designed for inter-frame matching in the panorama
-sweep; it accepts any two bitmaps. After Phase 1 ends, the tracker's reference is simply
-switched to a stored keyframe instead of the last captured live frame. The math for
-extracting angular shift from H is identical to Phase 1.
-
----
-
-### 4. `RealityProxyRenderer.kt`
-
-Stateless Canvas renderer for the Reality Proxy overlay.
-
-```kotlin
-class RealityProxyRenderer {
-
-    /**
-     * Composite the panorama + hierarchy overlay onto a copy of [frame] and return it.
-     *
-     * @param frame           Current live camera frame (used for output bitmap dimensions only)
-     * @param panorama        Stitched panorama bitmap
-     * @param nodes           Pre-built hierarchy nodes
-     * @param currentAngleDeg Current estimated angle from PanoramaLocalizer
-     * @param minAngleDeg     Min angle in the panorama
-     * @param maxAngleDeg     Max angle in the panorama
-     * @param focusedNode     Hierarchy node under the center square, or null
-     */
-    fun render(
-        frame: Bitmap,
-        panorama: Bitmap,
-        nodes: List<HierarchyNode>,
-        currentAngleDeg: Float,
-        minAngleDeg: Float,
-        maxAngleDeg: Float,
-        focusedNode: HierarchyNode?
-    ): Bitmap
-}
-```
-
-**Render pipeline:**
-
-1. **Create output** = `frame.copy(ARGB_8888, true)` (same resolution as live feed)
-2. **Fit panorama** into output with letterbox:
-   - `scaleX = outW / panorama.width`, `scaleY = outH / panorama.height`
-   - `scale = min(scaleX, scaleY)`
-   - `drawW = panorama.width * scale`, `drawH = panorama.height * scale`
-   - `offsetX = (outW - drawW) / 2f`, `offsetY = (outH - drawH) / 2f`
-   - Draw via `canvas.drawBitmap(panorama, null, RectF(offsetX, offsetY, offsetX+drawW, offsetY+drawH), null)`
-3. **Draw hierarchy nodes** (gray outline rectangles + labels):
-   - For each node: `screenLeft = offsetX + node.panoramaXFraction * drawW - node.panoramaWidthFraction * drawW / 2`
-   - `screenRight = screenLeft + node.panoramaWidthFraction * drawW`
-   - Draw `RectF(screenLeft, offsetY, screenRight, offsetY + drawH)` with gray stroke paint
-   - Draw label at `(screenLeft + 8, offsetY + 40)`
-4. **Draw FOV indicator** (blue fill + white border):
-   - `fovSpan = CAMERA_FOV_DEGREES / (maxAngleDeg - minAngleDeg) * drawW`
-   - `fovCenterX = offsetX + (currentAngleDeg - minAngleDeg) / (maxAngleDeg - minAngleDeg) * drawW`
-   - `RectF(fovCenterX - fovSpan/2, offsetY, fovCenterX + fovSpan/2, offsetY + drawH)`
-5. **Draw center crosshair** at `(fovCenterX, offsetY + drawH/2)` — 40px arms, white, 2.5px stroke
-6. **Highlight focused node** (if non-null):
-   - Redraw its rect with bright cyan stroke + semi-transparent cyan fill
-7. **Detail panel** (bottom strip, ~22% of outH):
-   - Dark semi-transparent background across full width
-   - `focusedNode?.label` in large white bold text
-   - `focusedNode?.description` (or `"Look at a region to see details"` if null) in smaller text
-   - If `description` is empty (v1): show `"${focusedNode.angleDeg.toInt()}° — tap to describe (coming soon)"`
-
----
-
-## Modified Files
-
----
-
-### `PanoramaState.kt`
-
-1. Add `PanoramaPhase` enum (see above).
-2. Add fields to `PanoramaState`:
-   ```kotlin
-   var phase: PanoramaPhase = PanoramaPhase.IDLE
-   @Volatile var hierarchyNodes: List<HierarchyNode> = emptyList()
-   var localizedAngleDeg: Float = 0f
-   var focusedNode: HierarchyNode? = null
-   ```
-3. Update `reset()`:
-   ```kotlin
-   phase = PanoramaPhase.IDLE
-   hierarchyNodes = emptyList()
-   localizedAngleDeg = 0f
-   focusedNode = null
-   ```
-4. Move `extractHorizontalShift()` from `PanoramaProcessor` to a package-level function
-   here (or a companion object), making it accessible to `PanoramaLocalizer` without
-   duplicating the math.
-
----
-
-### `PanoramaProcessor.kt`
-
-**New sub-components (initialized in `initialize()`):**
-```kotlin
-private val hierarchyBuilder = PanoramaHierarchyBuilder()
-private var localizer: PanoramaLocalizer? = null
-private val realityProxyRenderer = RealityProxyRenderer()
-private val processorScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-```
-
-**New @Volatile control flags:**
-```kotlin
-@Volatile private var realityProxyRequested    = false
-@Volatile private var exitRealityProxyRequested = false
-```
-
-**`initialize()` extension:**
-```kotlin
-localizer = PanoramaLocalizer()
-```
-
-**`process()` — new blocks inserted in order:**
-
-```
-① After startRequested handler (unchanged)
-
-② After stopRequested handler — extend:
-   // Existing: stitcher.stitch() → state.stitchedResult
-   // NEW after stitch:
-   state.phase = PanoramaPhase.IDLE
-   processorScope.launch {
-       val nodes = hierarchyBuilder.build(state.keyframes, state.stitchedResult!!.width)
-       hierarchyBuilder.setNodes(nodes)
-       state.hierarchyNodes = nodes
-       Log.d(TAG, "Hierarchy built: ${nodes.size} nodes")
-   }
-   // return existing OnDeviceProcessorResult (unchanged)
-
-③ NEW — handle realityProxyRequested (before normal capture loop):
-   if (realityProxyRequested) {
-       realityProxyRequested = false
-       state.phase = PanoramaPhase.REALITY_PROXY
-       localizer?.initialize(state.keyframes, featureTracker!!)
-       return@withContext OnDeviceProcessorResult(
-           processedImage = realityProxyRenderer.render(frame, state.stitchedResult!!, ...),
-           text = "Reality Proxy — look at objects",
-           processingTimeMs = elapsed
-       )
-   }
-
-④ NEW — handle exitRealityProxyRequested:
-   if (exitRealityProxyRequested) {
-       exitRealityProxyRequested = false
-       state.phase = PanoramaPhase.IDLE
-       localizer?.reset()
-       return@withContext OnDeviceProcessorResult(
-           processedImage = state.stitchedResult ?: frame,
-           text = null,
-           processingTimeMs = elapsed
-       )
-   }
-
-⑤ MODIFY existing "idle with stitchedResult" block:
-   if (!state.isCapturing && state.stitchedResult != null
-       && state.phase != PanoramaPhase.REALITY_PROXY) {
-       // existing frozen-result return, add status text:
-       val statusText = if (state.hierarchyNodes.isEmpty()) "Building scene map…" else null
-       return@withContext OnDeviceProcessorResult(
-           processedImage = state.stitchedResult,
-           text = statusText,
-           processingTimeMs = elapsed
-       )
-   }
-
-⑥ NEW — Reality Proxy live frame loop:
-   if (state.phase == PanoramaPhase.REALITY_PROXY && state.stitchedResult != null) {
-       val angle = localizer?.localize(frame, state.keyframes, featureTracker!!)
-                   ?: state.localizedAngleDeg
-       state.localizedAngleDeg = angle
-       state.focusedNode = hierarchyBuilder.findNodeAt(angle)
-       return@withContext OnDeviceProcessorResult(
-           processedImage = realityProxyRenderer.render(
-               frame, state.stitchedResult!!,
-               state.hierarchyNodes, angle,
-               state.keyframes.minOf { it.angleDeg },
-               state.keyframes.maxOf { it.angleDeg },
-               state.focusedNode
-           ),
-           text = state.focusedNode?.label,
-           processingTimeMs = elapsed
-       )
-   }
-```
-
-**New public API:**
-```kotlin
-fun enterRealityProxy() {
-    if (state.stitchedResult != null) realityProxyRequested = true
-}
-fun exitRealityProxy() { exitRealityProxyRequested = true }
-val phase: PanoramaPhase get() = state.phase
-val hasStitchedResult: Boolean get() = state.stitchedResult != null
-```
-
-**`release()` extension:**
-```kotlin
-processorScope.cancel()
-localizer?.reset()
-hierarchyBuilder.clear()
-```
-
----
-
-### `StreamViewModel.kt` — `capturePhoto()` panorama branch
-
-Replace the current `if (processor.isCapturing) … else …` with a 4-way `when`:
-
-```kotlin
-if (processor is PanoramaProcessor) {
-    when {
-        processor.isCapturing -> {
-            // ── Stop sweep (existing) ────────────────────────────────────────
-            processor.stopPanorama()
-            _uiState.update { it.copy(statusMessage = "Stitching panorama…") }
-        }
-
-        processor.phase == PanoramaPhase.REALITY_PROXY -> {
-            // ── Exit Reality Proxy ───────────────────────────────────────────
-            processor.exitRealityProxy()
-            // Keep stitchedResult frozen; stop processing job
-            finishPanoramaCapture()
-            _uiState.update { it.copy(statusMessage = "Panorama ready — tap camera to enter proxy mode") }
-        }
-
-        processor.hasStitchedResult -> {
-            // ── Enter Reality Proxy ──────────────────────────────────────────
-            if (!_uiState.value.isStreamingToServer) startServerStreaming()
-            processor.enterRealityProxy()
-            _uiState.update { it.copy(statusMessage = "Reality Proxy — look at objects") }
-        }
-
-        else -> {
-            // ── Start new sweep (existing) ────────────────────────────────────
-            _uiState.update { it.copy(processedFrame = null) }
-            System.gc()
-            if (!_uiState.value.isStreamingToServer) startServerStreaming()
-            processor.startPanorama()
-            _uiState.update { it.copy(statusMessage = "Panorama sweep started — pan slowly") }
+when (phase) {
+    PanoramaPhase.CAPTURING -> {
+        // Existing bitmap Image preview — unchanged
+        Image(bitmap = processedFrame, ...)
+    }
+    else -> {
+        // Post-stitch: WebView + overlay
+        Box(Modifier.fillMaxSize()) {
+            AndroidView(factory = { carouselWebView }, Modifier.fillMaxSize())
+            LiveCropImage(frame = latestFrame, Modifier.align(Alignment.Center))
+            CrosshairView(Modifier.align(Alignment.Center))
+            NodeButtonRow(
+                visibleNodes = visibleNodes,
+                onNodeSelected = { viewModel.selectNode(it) }
+            )
+            NodeDetailPanel(
+                node = selectedNode,
+                Modifier.align(Alignment.BottomCenter)
+            )
         }
     }
-    return
 }
 ```
 
-The existing `handleLocalProcessorResult()` check for `"Panorama complete"` that calls
-`finishPanoramaCapture()` remains unchanged — it correctly stops processing after stitching
-so the frozen panorama is displayed while hierarchy building runs in `processorScope`.
+---
+
+### Node Buttons — Accessibility
+
+```kotlin
+@Composable
+fun NodeButtonRow(visibleNodes: List<VisibleNode>, onNodeSelected: (HierarchyNode) -> Unit) {
+    // visibleNodes already sorted by angle = left-to-right TalkBack order
+    visibleNodes.forEach { vn ->
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .offset(
+                    x = (vn.screenXFraction * screenWidth - buttonHalfWidth).dp,
+                    y = (vn.stackDepth * 48).dp
+                )
+                .semantics {
+                    role = Role.Button
+                    contentDescription = buildString {
+                        append(vn.node.label)
+                        if (vn.node.description.isNotEmpty()) {
+                            append(". ")
+                            append(vn.node.description)
+                        }
+                    }
+                }
+                .clickable { onNodeSelected(vn.node) }
+        ) {
+            // Visual: small pill label, semi-transparent colored background
+        }
+    }
+}
+```
+
+TalkBack swipe-right/left traverses nodes in angle order automatically.
+Double-tap triggers `selectNode()` → expands detail panel + Gemini Q&A if description empty.
+When carousel rotates and a node exits the FOV it is removed from composition →
+TalkBack focus moves to the next in-FOV node naturally.
 
 ---
 
-## Key Design Decisions
+### Zoom
 
-| Decision | Rationale |
+Handled entirely inside `panorama_carousel.html` via touch events — no Kotlin bridge.
+Pinch-in → decrease FOV (zoom in), pinch-out → increase FOV (zoom out).
+`loadPanorama()` resets FOV to default (75°).
+
+---
+
+### Depth Map (deferred)
+
+`loadDepthMap(base64)` is present in the HTML but wired to a no-op until Depth-Pro pipeline:
+
+1. Run Depth-Pro on `stitchedResult` after hierarchy building completes (processorScope)
+2. Normalise output to 0–1 greyscale
+3. `carouselManager.loadDepthMap(depthBitmap)`
+
+No other changes required — displacement slot already in the Three.js material.
+
+---
+
+### What Is Removed
+
+| Item | Reason |
 |---|---|
-| FeatureTracker reuse across phases | Avoids second ONNX session; same 4-thread XNNPACK config; only the reference bitmap changes |
-| Hierarchy building in `processorScope` (not `localProcessingJob`) | `localProcessingJob` is cancelled after stitching; `processorScope` runs independently, outlives the job |
-| Phase flag `@Volatile`, request flags `@Volatile` | Same pattern as `startRequested`/`stopRequested`; single writer (process coroutine) reads them at the top of each call, no lock needed |
-| Horizontal localization only (v1) | Panorama is a horizontal sweep; vertical drift is corrected in Phase 2 stitch but not tracked for gaze |
-| Null localization → hold last known angle | Prevents UI jitter if tracker momentarily fails; graceful degradation |
-| `extractHorizontalShift` moved to package-level | Eliminates duplication between `PanoramaProcessor` and `PanoramaLocalizer`; pure function, no state |
-| FastVLM descriptions deferred (v2) | LiteRT-LM Engine is ~1.1 GB and may not be initialized; v1 labels are angle strings which convey spatial meaning |
+| `RealityProxyRenderer.kt` | Replaced by Three.js carousel |
+| `PanoramaProcessor.buildAnnotatedPanorama()` | Nodes are native accessibility buttons |
+| `PanoramaProcessor.renderRealityProxy()` | No bitmap rendering post-stitch |
+| Bitmap output for IDLE / REALITY_PROXY / PANORAMA_DONE | WebView owns display |
+
+### What Is Unchanged
+
+| Component | Notes |
+|---|---|
+| `StripRenderer.kt` | Phase 1 capture preview — bitmap overlay on live frame |
+| `PanoramaLocalizer.kt` | Absolute xFraction localization — drives carousel rotation |
+| `PanoramaStitcher.kt` | Unchanged |
+| `PanoramaHierarchyBuilder.kt` | Unchanged |
+| `PanoramaSaveManager.kt` | Loaded panoramas enter PANORAMA_DONE → WebView |
+| `FlorenceProcessor.kt` | Unchanged |
+| Phase 1 guidance TTS | Unchanged |
 
 ---
 
-## Implementation Order
+### Implementation Order
 
-1. `PanoramaPhase` enum + new fields in `PanoramaState.kt`; move `extractHorizontalShift` / `extractVerticalShift` to package-level
-2. `HierarchyNode.kt`
-3. `PanoramaHierarchyBuilder.kt` (build + findNodeAt, no FastVLM yet)
-4. `PanoramaLocalizer.kt`
-5. `RealityProxyRenderer.kt`
-6. Modify `PanoramaProcessor.kt` (add components, extend process(), new public API)
-7. Modify `StreamViewModel.kt` capturePhoto() panorama branch
+1. `panorama_carousel.html` — Three.js carousel with full JS API + pinch zoom
+2. `CarouselWebViewManager.kt` — WebView setup, bitmap loading, angle bridge
+3. `PanoramaProcessor.kt` — expose `localizedAngleDeg` StateFlow, remove bitmap rendering paths
+4. `StreamViewModel.kt` — collect angle, compute visibleNodes, load panorama into manager
+5. `StreamScreen.kt` — swap post-stitch display to WebView + overlay composables
+6. `CarouselOverlayState.kt` + node button composables with accessibility semantics
+7. Delete `RealityProxyRenderer.kt`
 
-Steps 2–5 are independent and can be written in parallel. Step 6 depends on all four.
-Step 7 depends on step 6.
+Steps 1 and 2 are independent. Step 3 can proceed in parallel with 1–2. Steps 4–6 depend
+on 1–3. Step 7 is last.

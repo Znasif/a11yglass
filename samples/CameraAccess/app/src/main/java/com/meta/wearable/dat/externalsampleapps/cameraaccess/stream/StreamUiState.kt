@@ -14,6 +14,7 @@ package com.meta.wearable.dat.externalsampleapps.cameraaccess.stream
 
 import android.graphics.Bitmap
 import com.meta.wearable.dat.camera.types.StreamSessionState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.HierarchyNode
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.SavedPanorama
 
 enum class CaptureButtonMode {
@@ -57,6 +58,20 @@ data class StreamUiState(
     // Saved panorama picker
     val savedPanoramas: List<SavedPanorama> = emptyList(),
     val showPanoramaPicker: Boolean = false,
+
+    // Panorama viewer state
+    // carouselPanorama: set when stitching completes or a saved panorama is loaded.
+    // The UI displays this bitmap with a horizontal pan offset driven by carouselXFraction.
+    val carouselPanorama: Bitmap? = null,
+    // carouselAngularSpanDeg: degrees of horizontal coverage of carouselPanorama (unused by UI;
+    // retained for future depth / overlay calculations).
+    val carouselAngularSpanDeg: Float = 65f,
+    // carouselXFraction: updated each frame during REALITY_PROXY from PanoramaLocalizer.
+    // 0 = left edge of panorama, 0.5 = centre, 1 = right edge.
+    val carouselXFraction: Float = 0f,
+    // Hierarchy nodes: populated when Florence analysis completes after stitching.
+    // Each node carries its normalised position/size in the stitched panorama.
+    val hierarchyNodes: List<HierarchyNode> = emptyList(),
 ) {
     /**
      * Get the frame to display.
