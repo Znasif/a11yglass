@@ -5,61 +5,49 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.RectF
 import android.util.Log
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessor
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessorResult
-import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.florence.FlorenceProcessor
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.vizlens.FeatureTracker
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * PanoramaProcessor — three-phase panorama capture and Reality Proxy.
+ * PanoramaProcessor — vision-only panorama capture using SuperPoint+LightGlue.
  *
  * id = -108
  *
- * ## Phase 1 – Collection (live, during sweep)
+ * ## Two-phase architecture
+ *
+ * **Phase 1 – Collection (live, during sweep)**
  * Every incoming frame is compared against the last accepted keyframe via
  * FeatureTracker. Frames are classified as:
  *   - *too-close* (|dx| < MIN_CAPTURE_DEGREES) → skipped, redundant
  *   - *too-fast*  (|dx| > MAX_CAPTURE_DEGREES) → discarded, reference reset
  *   - *accepted*  (MIN ≤ |dx| ≤ MAX)           → stored as a new Keyframe
  *
- * ## Phase 2 – Stitching (post-hoc, after user stops)
- * All stored keyframes are composited into a single panorama bitmap.
- * Hierarchy building begins immediately afterward in processorScope.
+ * The live strip preview shows thumbnails at their angular positions.
  *
- * ## Phase 3 – Reality Proxy (interactive, user re-enters)
- * Live center-square reticle tracks position in the panorama via HLOC-style
- * localization (FeatureTracker reused with stored keyframe as reference).
- * Pre-derived hierarchy nodes are overlaid; focused node is highlighted.
+ * **Phase 2 – Stitching (post-hoc, after user stops)**
+ * All stored keyframes + pairwise H matrices are chained into a single canvas.
+ * The stitched result is shown in the strip until the next session.
  *
  * ## Threading
  * - `process()` runs on Dispatchers.Default (single writer, no locks needed).
- * - Start/stop/proxy request flags are @Volatile and checked at the top of
- *   each `process()` call.
+ * - `startPanorama()` / `stopPanorama()` are called from the UI thread and
+ *   write @Volatile flags that are checked at the start of each `process()` call.
  * - `AtomicBoolean isProcessing` drops concurrent frames to avoid queuing.
- * - `processorScope` runs hierarchy building independently of the localProcessingJob.
  */
 class PanoramaProcessor : OnDeviceProcessor {
 
     companion object {
         private const val TAG = "PanoramaProcessor"
-        const val PROCESSOR_ID = -108
         private val IDENTITY_H = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)
 
         // ── Guidance constants ────────────────────────────────────────────────
-        private const val MILESTONE_DEG   = 20f    // announce at 20°, 40°, 60° …
+        private const val MILESTONE_DEG   = 20f    // announce at 30°, 60°, 90° …
         private const val SLOW_THRESHOLD  = 3      // consecutive non-advancing frames → nudge
         private const val MIN_GUIDANCE_MS = 8_000L // minimum gap between any two TTS lines
     }
@@ -70,55 +58,22 @@ class PanoramaProcessor : OnDeviceProcessor {
 
     // ── Sub-components ───────────────────────────────────────────────────────
     private var featureTracker: FeatureTracker? = null
-    private val state              = PanoramaState()
-    private val stitcher           = PanoramaStitcher()
-    private val stripRenderer      = StripRenderer()
-    private val hierarchyBuilder   = PanoramaHierarchyBuilder()
-    private var localizer: PanoramaLocalizer? = null
-    private val realityProxyRenderer = RealityProxyRenderer()
-
-    /**
-     * Optional Florence-2 processor used to build a semantic hierarchy after
-     * stitching. Set via [setFlorenceProcessor] from [OnDeviceProcessorManager]
-     * after both processors are created. If null, falls back to angle-labelled nodes.
-     */
-    private var florenceProcessor: FlorenceProcessor? = null
-
-    fun setFlorenceProcessor(fp: FlorenceProcessor) {
-        florenceProcessor = fp
-    }
-
-    // Long-lived scope for hierarchy building — survives localProcessingJob cancellation.
-    private val processorScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-
-    // ── Hierarchy-ready signal ────────────────────────────────────────────────
-    // Emits true once Florence / fallback hierarchy completes after stitching.
-    // StreamViewModel collects this to activate the Explore button.
-    private val _hierarchyReady = MutableStateFlow(false)
-    val hierarchyReady: StateFlow<Boolean> = _hierarchyReady.asStateFlow()
+    private val state        = PanoramaState()
+    private val stitcher     = PanoramaStitcher()
+    private val stripRenderer = StripRenderer()
 
     // ── Concurrency guards ───────────────────────────────────────────────────
     private val isProcessing = AtomicBoolean(false)
-    @Volatile private var startRequested         = false
-    @Volatile private var stopRequested          = false
-    @Volatile private var realityProxyRequested  = false
-    @Volatile private var exitProxyRequested     = false
+    @Volatile private var startRequested = false
+    @Volatile private var stopRequested  = false
 
     // ── Guidance state (reset each session) ──────────────────────────────────
-    private var lastSpokenMilestoneDeg = 0f
-    private var consecutiveStillFrames = 0
-    private var lastGuidanceMs         = 0L
-
-    // ── Reality Proxy tracking ────────────────────────────────────────────────
-    // Only announce when the focused node changes, to avoid per-frame TTS spam.
-    private var lastAnnouncedNodeLabel: String? = null
+    private var lastSpokenMilestoneDeg = 0f   // last milestone already announced
+    private var consecutiveStillFrames = 0    // frames where camera didn't advance
+    private var lastGuidanceMs         = 0L   // wall-clock time of last TTS utterance
 
     // ── Public state ─────────────────────────────────────────────────────────
-    val isCapturing: Boolean        get() = state.isCapturing
-    val phase: PanoramaPhase        get() = state.phase
-    val hasStitchedResult: Boolean  get() = state.stitchedResult != null
-    val stitchedResult: Bitmap?     get() = state.stitchedResult
-    val hierarchyNodeCount: Int     get() = state.hierarchyNodes.size
+    val isCapturing: Boolean get() = state.isCapturing
 
     // ── Overlay paint ────────────────────────────────────────────────────────
     private val statusPaint = Paint().apply {
@@ -133,7 +88,6 @@ class PanoramaProcessor : OnDeviceProcessor {
 
     override fun initialize(context: Context) {
         featureTracker = FeatureTracker(context)
-        localizer      = PanoramaLocalizer()
         Log.d(TAG, "PanoramaProcessor initialized")
     }
 
@@ -152,18 +106,15 @@ class PanoramaProcessor : OnDeviceProcessor {
             }
 
             try {
-                // ── ① Handle start request ───────────────────────────────────
+                // ── Handle start request ─────────────────────────────────────
                 if (startRequested) {
                     startRequested = false
-                    realityProxyRequested = false
-                    exitProxyRequested    = false
-                    _hierarchyReady.value = false
                     state.reset()
-                    state.phase = PanoramaPhase.CAPTURING
+                    state.isCapturing = true
                     lastSpokenMilestoneDeg = 0f
                     consecutiveStillFrames = 0
                     lastGuidanceMs = 0L
-                    lastAnnouncedNodeLabel = null
+
                     featureTracker?.setReferenceFrame(frame, emptyList())
                     state.lastAcceptedFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
                     captureKeyframe(frame, 0f, 0f, IDENTITY_H.copyOf())
@@ -176,10 +127,10 @@ class PanoramaProcessor : OnDeviceProcessor {
                     )
                 }
 
-                // ── ② Handle stop request ────────────────────────────────────
+                // ── Handle stop request ──────────────────────────────────────
                 if (stopRequested) {
                     stopRequested = false
-                    state.phase = PanoramaPhase.STITCHING
+                    state.isCapturing = false
 
                     if (state.keyframes.size >= 2) {
                         Log.d(TAG, "Phase 2: stitching ${state.keyframes.size} keyframes…")
@@ -188,47 +139,11 @@ class PanoramaProcessor : OnDeviceProcessor {
                         Log.d(TAG, "Not enough keyframes to stitch (${state.keyframes.size})")
                     }
 
-                    state.phase = PanoramaPhase.IDLE
-
-                    // Launch scene analysis in processorScope (outlives localProcessingJob).
-                    // Reality Proxy is gated on this completing (enterRealityProxy checks
-                    // state.hierarchyNodes.isNotEmpty()).
-                    val panorama         = state.stitchedResult
-                    val panoramaWidth    = panorama?.width
-                    val keyframeSnapshot = state.keyframes.toList()
-                    if (panoramaWidth != null && panorama != null) {
-                        val fp = florenceProcessor
-                        processorScope.launch {
-                            val nodes: List<HierarchyNode>
-                            if (fp != null) {
-                                Log.d(TAG, "Launching Florence scene analysis on ${panorama.width}×${panorama.height} panorama…")
-                                val regions = fp.analyzeRegionsTiled(panorama)
-
-                nodes = if (regions.isNotEmpty()) {
-                                    val minAngle = keyframeSnapshot.minOf { it.angleDeg }
-                                    val maxAngle = keyframeSnapshot.maxOf { it.angleDeg }
-                                    val fov = keyframeSnapshot.firstOrNull()?.bitmap?.let {
-                                        cameraHFovDeg(it.width, it.height)
-                                    } ?: 65f
-                                    hierarchyBuilder.buildFromFlorence(
-                                        regions, panoramaWidth, panorama.height, minAngle, maxAngle, fov
-                                    ).also { Log.d(TAG, "Florence hierarchy: ${it.size} nodes") }
-                                } else {
-                                    Log.d(TAG, "Florence returned no regions — falling back to angle labels")
-                                    hierarchyBuilder.build(keyframeSnapshot, panoramaWidth)
-                                }
-                            } else {
-                                nodes = hierarchyBuilder.build(keyframeSnapshot, panoramaWidth)
-                            }
-                            hierarchyBuilder.setNodes(nodes)
-                            state.hierarchyNodes = nodes
-                            _hierarchyReady.value = true
-                            Log.d(TAG, "Hierarchy ready: ${nodes.size} nodes — signalling ViewModel")
-                        }
-                    }
-
                     val msg = "Panorama complete, ${state.keyframes.size} frames stitched"
                     Log.d(TAG, msg)
+                    // Return the stitched panorama full-screen, not wrapped in the live strip overlay.
+                    // Subsequent process() calls will keep returning it (see below) until a new
+                    // session starts, so the result stays frozen in the UI.
                     return@withContext OnDeviceProcessorResult(
                         processedImage = state.stitchedResult ?: renderFrame(frame),
                         text = msg,
@@ -236,51 +151,10 @@ class PanoramaProcessor : OnDeviceProcessor {
                     )
                 }
 
-                // ── ③ Handle enter Reality Proxy request ─────────────────────
-                if (realityProxyRequested) {
-                    realityProxyRequested = false
-                    state.phase = PanoramaPhase.REALITY_PROXY
-                    lastAnnouncedNodeLabel = null
-                    state.stitchedResult?.let { panorama ->
-                        // Strip must be the same pixel width as the live frame so both images
-                        // compress identically inside FeatureTracker's 512×512 normalisation.
-                        // Using hFOV×PX_PER_DEG (260px) vs frame.width (720px) causes a 2.77×
-                        // x-scale mismatch in descriptor space → false positive matches.
-                        val stripWidthPx = frame.width.coerceAtMost(panorama.width)
-                        localizer?.initialize(panorama, stripWidthPx)
-                    }
-                    Log.d(TAG, "Entered Reality Proxy mode — ${state.hierarchyNodes.size} nodes, " +
-                        "${state.keyframes.size} keyframes")
-
-                    return@withContext OnDeviceProcessorResult(
-                        processedImage = renderRealityProxy(frame),
-                        text = "Reality Proxy — look at objects",
-                        processingTimeMs = System.currentTimeMillis() - t0
-                    )
-                }
-
-                // ── ④ Handle exit Reality Proxy request ──────────────────────
-                if (exitProxyRequested) {
-                    exitProxyRequested = false
-                    state.phase = PanoramaPhase.IDLE
-                    localizer?.reset()
-                    lastAnnouncedNodeLabel = null
-                    Log.d(TAG, "Exited Reality Proxy mode")
-
-                    return@withContext OnDeviceProcessorResult(
-                        processedImage = state.stitchedResult ?: frame,
-                        text = null,
-                        processingTimeMs = System.currentTimeMillis() - t0
-                    )
-                }
-
-                // ── ⑤ Idle with completed stitch: keep returning frozen result ─
-                // Excludes REALITY_PROXY (which has its own live loop below).
-                // TTS progress updates are driven by StreamViewModel.startHierarchyWatcher().
-                if (!state.isCapturing
-                    && state.stitchedResult != null
-                    && state.phase != PanoramaPhase.REALITY_PROXY
-                ) {
+                // ── If idle with a completed stitch, keep returning it ────────
+                // This freezes the processedFrame on the result between the stop
+                // and the moment StreamViewModel cancels the localProcessingJob.
+                if (!state.isCapturing && state.stitchedResult != null) {
                     return@withContext OnDeviceProcessorResult(
                         processedImage = state.stitchedResult,
                         text = null,
@@ -288,43 +162,7 @@ class PanoramaProcessor : OnDeviceProcessor {
                     )
                 }
 
-                // ── ⑥ Reality Proxy live frame loop ──────────────────────────
-                if (state.phase == PanoramaPhase.REALITY_PROXY && state.stitchedResult != null) {
-                    Log.v(TAG, "RP frame ${frame.width}×${frame.height}")
-                    // Convert X fraction → angle using panorama's angle range.
-                    // For loaded panoramas with no keyframes, infer range from pixel width.
-                    val panorama = state.stitchedResult!!
-                    val minAngle = state.keyframes.minOfOrNull { it.angleDeg } ?: 0f
-                    val maxAngle = state.keyframes.maxOfOrNull { it.angleDeg }
-                        ?.coerceAtLeast(minAngle + panorama.width.toFloat() / PX_PER_DEG)
-                        ?: (panorama.width.toFloat() / PX_PER_DEG)
-
-                    val xFraction = localizer?.localize(frame, featureTracker!!)
-                    if (xFraction != null) {
-                        state.localizedAngleDeg = minAngle + xFraction * (maxAngle - minAngle)
-                    }
-                    val angle = state.localizedAngleDeg
-
-                    val prevFocused = state.focusedNode
-                    state.focusedNode = hierarchyBuilder.findNodeAt(angle)
-
-                    // Only announce when the focused node changes to avoid per-frame TTS spam
-                    val newLabel = state.focusedNode?.label
-                    val announcement = if (newLabel != lastAnnouncedNodeLabel) {
-                        lastAnnouncedNodeLabel = newLabel
-                        newLabel
-                    } else {
-                        null
-                    }
-
-                    return@withContext OnDeviceProcessorResult(
-                        processedImage = renderRealityProxy(frame),
-                        text = announcement,
-                        processingTimeMs = System.currentTimeMillis() - t0
-                    )
-                }
-
-                // ── Normal Phase 1 capture loop ───────────────────────────────
+                // ── Normal capture loop ──────────────────────────────────────
                 var guidanceText: String? = null
 
                 if (state.isCapturing) {
@@ -333,6 +171,7 @@ class PanoramaProcessor : OnDeviceProcessor {
                     val H        = featureTracker?.computeHomography(frame)
 
                     if (H == null) {
+                        // Bad frame: motion blur, texture-less area, no reference set yet
                         state.skippedCount++
                         consecutiveStillFrames++
                         Log.d(TAG, "Bad frame (null H) — skipping [total skipped=${state.skippedCount}]")
@@ -343,7 +182,7 @@ class PanoramaProcessor : OnDeviceProcessor {
                         }
                     } else {
                         val shiftPx  = extractHorizontalShift(H, frame.width, frame.height)
-                        val shiftDeg = shiftPx / frame.width * cameraHFovDeg(frame.width, frame.height)
+                        val shiftDeg = shiftPx / frame.width * CAMERA_FOV_DEGREES
 
                         when {
                             abs(shiftDeg) < MIN_CAPTURE_DEGREES -> {
@@ -360,6 +199,7 @@ class PanoramaProcessor : OnDeviceProcessor {
                             abs(shiftDeg) > MAX_CAPTURE_DEGREES -> {
                                 consecutiveStillFrames = 0
                                 Log.d(TAG, "Too fast (${"%.1f".format(shiftDeg)}°) — discarded, resetting reference")
+                                // Re-anchor to current frame so the next comparison is local
                                 featureTracker?.setReferenceFrame(frame, emptyList())
                                 state.lastAcceptedFrame?.let { if (!it.isRecycled) it.recycle() }
                                 state.lastAcceptedFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
@@ -373,6 +213,7 @@ class PanoramaProcessor : OnDeviceProcessor {
                                 featureTracker?.setReferenceFrame(frame, emptyList())
                                 state.lastAcceptedFrame?.let { if (!it.isRecycled) it.recycle() }
                                 state.lastAcceptedFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
+                                // Announce angle milestone (30°, 60°, 90° …)
                                 val milestone = (state.currentAngleDeg / MILESTONE_DEG).toInt() * MILESTONE_DEG
                                 if (canSpeak && milestone >= MILESTONE_DEG && milestone > lastSpokenMilestoneDeg) {
                                     lastSpokenMilestoneDeg = milestone
@@ -384,7 +225,7 @@ class PanoramaProcessor : OnDeviceProcessor {
                     }
                 }
 
-                // ── Render strip overlay (Phase 1 live preview) ───────────────
+                // ── Render strip overlay ─────────────────────────────────────
                 OnDeviceProcessorResult(
                     processedImage = renderFrame(frame),
                     text = guidanceText,
@@ -397,11 +238,8 @@ class PanoramaProcessor : OnDeviceProcessor {
         }
 
     override fun release() {
-        processorScope.cancel()
         featureTracker?.release()
         featureTracker = null
-        localizer?.reset()
-        hierarchyBuilder.clear()
         state.reset()
         stitcher.release()
         Log.d(TAG, "PanoramaProcessor released")
@@ -423,139 +261,6 @@ class PanoramaProcessor : OnDeviceProcessor {
         Log.d(TAG, "stopPanorama() requested")
     }
 
-    /**
-     * Enter Reality Proxy mode.
-     *
-     * Allowed as soon as stitching is complete, even while Florence scene
-     * analysis is still running in the background. Hierarchy nodes will
-     * populate progressively; the live cutout and panorama are available
-     * immediately. No-op if there is no stitched result yet.
-     */
-    fun enterRealityProxy() {
-        if (state.stitchedResult == null) {
-            Log.d(TAG, "enterRealityProxy() ignored — no stitched result yet")
-            return
-        }
-        realityProxyRequested = true
-        val nodeCount = state.hierarchyNodes.size
-        Log.d(TAG, "enterRealityProxy() requested — $nodeCount nodes available so far")
-    }
-
-    /**
-     * Exit Reality Proxy mode and return to frozen panorama display.
-     *
-     * Phase is reset immediately rather than via a flag, because
-     * finishPanoramaCapture() cancels localProcessingJob before the next
-     * process() call can run — so the flag would never be consumed and
-     * state.phase would remain REALITY_PROXY, breaking re-entry.
-     */
-    fun exitRealityProxy() {
-        exitProxyRequested = false   // clear any stale flag
-        state.phase = PanoramaPhase.IDLE
-        localizer?.reset()
-        lastAnnouncedNodeLabel = null
-        Log.d(TAG, "exitRealityProxy() — phase reset to IDLE immediately")
-    }
-
-    /**
-     * Load a previously saved panorama bitmap and re-run the Florence scene analysis
-     * pipeline on it, exactly as happens after a live sweep.
-     *
-     * - Sets [state.stitchedResult] to the provided bitmap.
-     * - Resets hierarchy and fires [_hierarchyReady] false → true when done.
-     * - [StreamViewModel.startHierarchyWatcher] can be called immediately after to
-     *   drive UI state in the same way as after a live stitch.
-     *
-     * Angle values are inferred from pixel width (minAngle=0, maxAngle=width/PX_PER_DEG).
-     * This is only used for Reality Proxy localization, which is unavailable without
-     * live keyframes; overlay display is purely fraction-based and is unaffected.
-     */
-    fun loadAndAnalyzePanorama(bitmap: Bitmap) {
-        val copy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
-        state.stitchedResult  = copy
-        state.hierarchyNodes  = emptyList()
-        state.phase           = PanoramaPhase.IDLE
-        hierarchyBuilder.setNodes(emptyList())
-        _hierarchyReady.value = false
-
-        val fp = florenceProcessor
-        processorScope.launch {
-            val nodes: List<HierarchyNode>
-            if (fp != null) {
-                Log.d(TAG, "loadAndAnalyzePanorama: launching Florence on ${copy.width}×${copy.height}")
-                val regions = fp.analyzeRegionsTiled(copy)
-                nodes = if (regions.isNotEmpty()) {
-                    val inferredMaxAngle = copy.width / PX_PER_DEG
-                    hierarchyBuilder.buildFromFlorence(
-                        regions, copy.width, copy.height, 0f, inferredMaxAngle, 65f
-                    ).also { Log.d(TAG, "loadAndAnalyzePanorama: ${it.size} nodes from Florence") }
-                } else {
-                    Log.d(TAG, "loadAndAnalyzePanorama: Florence returned no regions")
-                    emptyList()
-                }
-            } else {
-                Log.d(TAG, "loadAndAnalyzePanorama: no Florence processor — no hierarchy")
-                nodes = emptyList()
-            }
-            hierarchyBuilder.setNodes(nodes)
-            state.hierarchyNodes  = nodes
-            _hierarchyReady.value = true
-        }
-    }
-
-    /**
-     * Draw colored node overlays onto a copy of the stitched panorama.
-     * Called by StreamViewModel when the hierarchy is ready so the stitch
-     * viewer shows annotated regions before the user enters Reality Proxy.
-     * Returns null if no stitched result is available yet.
-     */
-    fun buildAnnotatedPanorama(): Bitmap? {
-        val panorama = state.stitchedResult ?: return null
-        if (panorama.isRecycled) return null
-        val nodes    = state.hierarchyNodes
-        if (nodes.isEmpty()) return panorama
-
-        val output = panorama.copy(Bitmap.Config.ARGB_8888, true)
-        val canvas = Canvas(output)
-        val w = output.width.toFloat()
-        val h = output.height.toFloat()
-
-        val boxPaint   = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 6f; isAntiAlias = true }
-        val fillPaint  = Paint().apply { style = Paint.Style.FILL }
-        val labelBgPaint = Paint().apply { style = Paint.Style.FILL }
-        val labelPaint = Paint().apply {
-            color = Color.WHITE; textSize = 36f; isFakeBoldText = true; isAntiAlias = true
-            setShadowLayer(2f, 1f, 1f, Color.BLACK)
-        }
-
-        for ((idx, node) in nodes.withIndex()) {
-            val color  = NODE_COLORS[idx % NODE_COLORS.size]
-            val cx     = node.panoramaXFraction      * w
-            val cy     = node.panoramaYFraction       * h
-            val halfW  = node.panoramaWidthFraction  * w / 2f
-            val halfH  = node.panoramaHeightFraction * h / 2f
-            val rect   = RectF(
-                (cx - halfW).coerceAtLeast(0f), (cy - halfH).coerceAtLeast(0f),
-                (cx + halfW).coerceAtMost(w),   (cy + halfH).coerceAtMost(h),
-            )
-
-            fillPaint.color  = (color and 0x00FFFFFF) or (50 shl 24)   // 20% alpha fill
-            boxPaint.color   = color
-            labelBgPaint.color = color
-
-            canvas.drawRect(rect, fillPaint)
-            canvas.drawRect(rect, boxPaint)
-
-            // Label background + text at top-left of region
-            val label     = node.label.take(30)
-            val textWidth = labelPaint.measureText(label)
-            canvas.drawRect(rect.left, rect.top, rect.left + textWidth + 16f, rect.top + 52f, labelBgPaint)
-            canvas.drawText(label, rect.left + 8f, rect.top + 40f, labelPaint)
-        }
-
-        return output
-    }
-
     // ── Private helpers ──────────────────────────────────────────────────────
 
     /**
@@ -575,29 +280,40 @@ class PanoramaProcessor : OnDeviceProcessor {
     }
 
     /**
-     * Render the Phase-3 Reality Proxy composite for [frame].
-     * Falls back to the strip overlay if no stitched result is available.
+     * Extract horizontal pixel shift from a 3×3 row-major homography.
+     *
+     * H maps the *reference* frame → *current* frame.
+     * Projects the image centre from reference space into current space; the
+     * difference tells us how far (in pixels) the scene has shifted horizontally.
+     * When the camera pans right the scene moves left → xCur < cx → shift > 0.
      */
-    private fun renderRealityProxy(frame: Bitmap): Bitmap {
-        val panorama = state.stitchedResult ?: return renderFrame(frame)
-        val minAngle = state.keyframes.minOfOrNull { it.angleDeg } ?: 0f
-        val maxAngle = state.keyframes.maxOfOrNull { it.angleDeg }
-            ?.coerceAtLeast(minAngle + panorama.width.toFloat() / PX_PER_DEG)
-            ?: (panorama.width.toFloat() / PX_PER_DEG)
-
-        return realityProxyRenderer.render(
-            frame           = frame,
-            panorama        = panorama,
-            nodes           = state.hierarchyNodes,
-            currentAngleDeg = state.localizedAngleDeg,
-            minAngleDeg     = minAngle,
-            maxAngleDeg     = maxAngle,
-            focusedNode     = state.focusedNode,
-        )
+    private fun extractHorizontalShift(H: FloatArray, frameWidth: Int, frameHeight: Int): Float {
+        val cx = frameWidth  / 2f
+        val cy = frameHeight / 2f
+        val w  = H[6] * cx + H[7] * cy + H[8]
+        if (w == 0f) return 0f
+        val xCur = (H[0] * cx + H[1] * cy + H[2]) / w
+        return cx - xCur
     }
 
     /**
-     * Composite the Phase-1 strip preview onto a mutable copy of [frame].
+     * Extract vertical pixel shift from a 3×3 row-major homography.
+     *
+     * Same projection as horizontal, but reads the Y coordinate.
+     * When the camera tilts down the scene moves up → yCur < cy → shift > 0.
+     * A positive shift means the canvas row for this frame must move downward.
+     */
+    private fun extractVerticalShift(H: FloatArray, frameWidth: Int, frameHeight: Int): Float {
+        val cx = frameWidth  / 2f
+        val cy = frameHeight / 2f
+        val w  = H[6] * cx + H[7] * cy + H[8]
+        if (w == 0f) return 0f
+        val yCur = (H[3] * cx + H[4] * cy + H[5]) / w
+        return cy - yCur
+    }
+
+    /**
+     * Composite the strip preview onto a mutable copy of [frame] and return it.
      */
     private fun renderFrame(frame: Bitmap): Bitmap {
         val output = frame.copy(Bitmap.Config.ARGB_8888, true)
@@ -620,7 +336,7 @@ class PanoramaProcessor : OnDeviceProcessor {
             frame.width,
             frame.height,
             state.currentAngleDeg,
-            state.keyframes.toList(),
+            state.keyframes.toList(),   // snapshot to avoid ConcurrentModificationException
             state.isCapturing,
             state.stitchedResult
         )
