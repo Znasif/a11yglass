@@ -50,6 +50,10 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -108,6 +112,7 @@ fun StreamScreen(
         onHidePanoramaPicker = { streamViewModel.hidePanoramaPicker() },
         onLoadSavedPanorama = { streamViewModel.loadSavedPanorama(it) },
         onDeleteSavedPanorama = { streamViewModel.deleteSavedPanorama(it) },
+        onStepNode = { streamViewModel.stepNode(it) },
         modifier = modifier
     )
 }
@@ -130,12 +135,22 @@ fun StreamScreenContent(
     onHidePanoramaPicker: () -> Unit,
     onLoadSavedPanorama: (String) -> Unit,
     onDeleteSavedPanorama: (String) -> Unit,
+    onStepNode: (Int) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // Manual pan position for PANORAMA_ANALYZING / PANORAMA_DONE phases.
     // Reset to centre whenever a new panorama is loaded.
     var manualXFraction by remember { mutableStateOf(0.5f) }
     LaunchedEffect(streamUiState.carouselPanorama) { manualXFraction = 0.5f }
+
+    // When the focused node changes (via stepNode), snap the pan to that node.
+    val currentNodeIndex = streamUiState.currentNodeIndex
+    LaunchedEffect(currentNodeIndex) {
+        val nodes = streamUiState.hierarchyNodes
+        if (currentNodeIndex in nodes.indices) {
+            manualXFraction = nodes[currentNodeIndex].panoramaXFraction
+        }
+    }
 
     val isCarouselMode = streamUiState.captureButtonMode in listOf(
         CaptureButtonMode.PANORAMA_ANALYZING,
@@ -156,15 +171,38 @@ fun StreamScreenContent(
 
                 BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                     // Panorama image
+                    // Swipe behaviour:
+                    // • PANORAMA_DONE with nodes → discrete step (left/right = prev/next node)
+                    // • PROXY_ACTIVE or no nodes → continuous pan
+                    val discreteSwipe = streamUiState.captureButtonMode == CaptureButtonMode.PANORAMA_DONE
+                        && streamUiState.hierarchyNodes.isNotEmpty()
                     Image(
                         bitmap = panorama.asImageBitmap(),
                         contentDescription = null,
                         modifier = Modifier
                             .fillMaxSize()
-                            .pointerInput(Unit) {
-                                detectHorizontalDragGestures { _, dragAmount ->
-                                    manualXFraction = (manualXFraction - dragAmount / size.width * 2f)
-                                        .coerceIn(0f, 1f)
+                            .pointerInput(discreteSwipe) {
+                                if (discreteSwipe) {
+                                    var accumulated = 0f
+                                    detectHorizontalDragGestures(
+                                        onDragEnd = { accumulated = 0f },
+                                        onDragCancel = { accumulated = 0f },
+                                    ) { _, dragAmount ->
+                                        accumulated += dragAmount
+                                        val threshold = size.width * 0.15f
+                                        if (accumulated > threshold) {
+                                            onStepNode(-1)
+                                            accumulated = 0f
+                                        } else if (accumulated < -threshold) {
+                                            onStepNode(+1)
+                                            accumulated = 0f
+                                        }
+                                    }
+                                } else {
+                                    detectHorizontalDragGestures { _, dragAmount ->
+                                        manualXFraction = (manualXFraction - dragAmount / size.width * 2f)
+                                            .coerceIn(0f, 1f)
+                                    }
                                 }
                             },
                         contentScale = ContentScale.FillHeight,
@@ -191,14 +229,21 @@ fun StreamScreenContent(
                         val centerY = maxHeight * node.panoramaYFraction
                         val nodeH   = 36.dp
                         val top     = (centerY - nodeH / 2).coerceIn(0.dp, maxHeight - nodeH)
-                        val color   = Color(NODE_COLORS[idx % NODE_COLORS.size])
+                        val color     = Color(NODE_COLORS[idx % NODE_COLORS.size])
+                        val isFocused = idx == currentNodeIndex
+                        val borderColor = if (isFocused) Color.Yellow else Color.White.copy(alpha = 0.7f)
+                        val borderWidth = if (isFocused) 2.dp else 1.dp
                         Box(
                             modifier = Modifier
                                 .offset(x = left, y = top)
                                 .size(nodeW, nodeH)
-                                .border(1.dp, Color.White.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
+                                .border(borderWidth, borderColor, RoundedCornerShape(8.dp))
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(color.copy(alpha = 0.75f))
+                                .background(color.copy(alpha = if (isFocused) 0.95f else 0.75f))
+                                .semantics(mergeDescendants = true) {
+                                    contentDescription = node.label
+                                    role = Role.Button
+                                }
                                 .clickable { manualXFraction = node.panoramaXFraction }
                                 .padding(horizontal = 6.dp, vertical = 2.dp),
                             contentAlignment = Alignment.Center,

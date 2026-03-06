@@ -72,6 +72,9 @@ data class StreamUiState(
     // Hierarchy nodes: populated when Florence analysis completes after stitching.
     // Each node carries its normalised position/size in the stitched panorama.
     val hierarchyNodes: List<HierarchyNode> = emptyList(),
+    // currentNodeIndex: -1 = no node focused; 0..n-1 = focused node index.
+    // Driven by swipe-left/right gestures in PANORAMA_DONE; resets on new sweep.
+    val currentNodeIndex: Int = -1,
 ) {
     /**
      * Get the frame to display.

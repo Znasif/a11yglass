@@ -514,6 +514,41 @@ class StreamViewModel(
         _uiState.update { it.copy(savedPanoramas = list) }
     }
 
+    /**
+     * Navigate to the next (+1) or previous (-1) hierarchy node.
+     * Announces the node label and its approximate o'clock position
+     * derived from its horizontal fraction in the panorama.
+     */
+    fun stepNode(delta: Int) {
+        val nodes = _uiState.value.hierarchyNodes
+        if (nodes.isEmpty()) return
+        val current = _uiState.value.currentNodeIndex
+        val next = when {
+            current < 0 -> if (delta > 0) 0 else nodes.size - 1
+            else -> (current + delta).coerceIn(0, nodes.size - 1)
+        }
+        _uiState.update { it.copy(currentNodeIndex = next) }
+        val state = _uiState.value
+        val node  = nodes[next]
+        val oClock = angleToOClock(
+            angleFromCenterDeg = (node.panoramaXFraction - 0.5f) * state.carouselAngularSpanDeg
+        )
+        announceText("${node.label}, $oClock o'clock")
+    }
+
+    /**
+     * Converts an angle relative to the panorama center to an o'clock hour.
+     * 0° = 12 o'clock, +30° = 1 o'clock, -30° = 11 o'clock, etc.
+     */
+    private fun angleToOClock(angleFromCenterDeg: Float): Int {
+        val raw = 12 + Math.round(angleFromCenterDeg / 30f)
+        return when {
+            raw <= 0  -> raw + 12
+            raw > 12  -> raw - 12
+            else      -> raw
+        }
+    }
+
     /** Update responseText, forward to server repository, and optionally speak via TTS. */
     private fun announceText(text: String) {
         _uiState.update { it.copy(responseText = text) }
@@ -863,7 +898,12 @@ class StreamViewModel(
                     localizationJob = null
                     // Clear the previous carousel panorama and hint GC to release the
                     // potentially 200+ MB stitch bitmap before the new session allocates.
-                    _uiState.update { it.copy(processedFrame = null, carouselPanorama = null) }
+                    _uiState.update { it.copy(
+                        processedFrame = null,
+                        carouselPanorama = null,
+                        hierarchyNodes = emptyList(),
+                        currentNodeIndex = -1,
+                    ) }
                     System.gc()
                     if (!_uiState.value.isStreamingToServer) startServerStreaming()
                     processor.startPanorama()
