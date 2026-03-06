@@ -1,0 +1,595 @@
+================================================
+FILE: florence2-webgpu/src/App.jsx
+================================================
+import { useEffect, useState, useRef, useCallback } from "react";
+
+import Progress from "./components/Progress";
+import ImageInput from "./components/ImageInput";
+
+const IS_WEBGPU_AVAILABLE = !!navigator.gpu;
+
+function App() {
+  // Create a reference to the worker object.
+  const worker = useRef(null);
+
+  // Model loading and progress
+  const [status, setStatus] = useState(null);
+  const [loadingMessage, setLoadingMessage] = useState("");
+  const [progressItems, setProgressItems] = useState([]);
+
+  const [task, setTask] = useState("<CAPTION>");
+  const [text, setText] = useState("");
+  const [image, setImage] = useState(null);
+  const [result, setResult] = useState(null);
+  const [time, setTime] = useState(null);
+
+  // We use the `useEffect` hook to setup the worker as soon as the `App` component is mounted.
+  useEffect(() => {
+    // Create the worker if it does not yet exist.
+    worker.current ??= new Worker(new URL("./worker.js", import.meta.url), {
+      type: "module",
+    });
+
+    // Create a callback function for messages from the worker thread.
+    const onMessageReceived = (e) => {
+      switch (e.data.status) {
+        case "loading":
+          // Model file start load: add a new progress item to the list.
+          setStatus("loading");
+          setLoadingMessage(e.data.data);
+          break;
+
+        case "initiate":
+          setProgressItems((prev) => [...prev, e.data]);
+          break;
+
+        case "progress":
+          // Model file progress: update one of the progress items.
+          setProgressItems((prev) =>
+            prev.map((item) => {
+              if (item.file === e.data.file) {
+                return { ...item, ...e.data };
+              }
+              return item;
+            }),
+          );
+          break;
+
+        case "done":
+          // Model file loaded: remove the progress item from the list.
+          setProgressItems((prev) =>
+            prev.filter((item) => item.file !== e.data.file),
+          );
+          break;
+
+        case "ready":
+          // Pipeline ready: the worker is ready to accept messages.
+          setStatus("ready");
+          break;
+
+        case "complete":
+          setResult(e.data.result);
+          setTime(e.data.time);
+          setStatus("ready");
+          break;
+      }
+    };
+
+    // Attach the callback function as an event listener.
+    worker.current.addEventListener("message", onMessageReceived);
+
+    // Define a cleanup function for when the component is unmounted.
+    return () => {
+      worker.current.removeEventListener("message", onMessageReceived);
+    };
+  }, []);
+
+  const handleClick = useCallback(() => {
+    if (status === null) {
+      setStatus("loading");
+      worker.current.postMessage({ type: "load" });
+    } else {
+      setStatus("running");
+      worker.current.postMessage({
+        type: "run",
+        data: { text, url: image, task },
+      });
+    }
+  }, [status, task, image, text]);
+
+  return IS_WEBGPU_AVAILABLE ? (
+    <div className="h-screen w-screen text-gray-800 dark:text-gray-200 bg-white dark:bg-gray-900">
+      <div className="flex flex-col mx-auto items justify-end max-w-[630px] h-full">
+        {status === "loading" && (
+          <div className="flex justify-center items-center fixed w-screen h-screen bg-black z-10 bg-opacity-[92%] top-0 left-0">
+            <div className="w-[500px]">
+              <p className="text-center mb-1 text-white text-md">
+                {loadingMessage}
+              </p>
+              {progressItems.map(({ file, progress, total }, i) => (
+                <Progress
+                  key={i}
+                  text={file}
+                  percentage={progress}
+                  total={total}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="h-full overflow-auto scrollbar-thin flex justify-center items-center flex-col relative">
+          <div className="flex flex-col items-center mb-1 text-center">
+            <h1 className="text-6xl font-bold mb-2">Florence-2 WebGPU</h1>
+            <h2 className="text-xl font-semibold">
+              Powerful vision foundation model running locally in your browser.
+            </h2>
+          </div>
+
+          <div className="w-full min-h-[220px] flex flex-col justify-center items-center p-2">
+            <p className="mb-2">
+              You are about to download{" "}
+              <a
+                href="https://huggingface.co/onnx-community/Florence-2-base-ft"
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium underline"
+              >
+                Florence-2-base-ft
+              </a>
+              , a 230 million parameter vision foundation model that uses a
+              prompt-based approach to handle a wide range of vision and
+              vision-language tasks like captioning, object detection, and
+              segmentation. Once loaded, the model (340&nbsp;MB) will be cached
+              and reused when you revisit the page.
+              <br />
+              <br />
+              Everything runs locally in your browser using{" "}
+              <a
+                href="https://huggingface.co/docs/transformers.js"
+                target="_blank"
+                rel="noreferrer"
+                className="underline"
+              >
+                🤗&nbsp;Transformers.js
+              </a>{" "}
+              and ONNX Runtime Web, meaning no API calls are made to a server
+              for inference. You can even disconnect from the internet after the
+              model has loaded!
+            </p>
+
+            <div className="flex w-full justify-around m-4">
+              <div className="flex flex-col gap-2 w-full max-w-[48%]">
+                <div className="flex flex-col">
+                  <span className="text-sm mb-0.5">Task</span>
+                  <select
+                    className="border rounded-md p-1 dark:bg-gray-800"
+                    value={task}
+                    onChange={(e) => setTask(e.target.value)}
+                  >
+                    <option value="<CAPTION>">Caption</option>
+                    <option value="<DETAILED_CAPTION>">Detailed Caption</option>
+                    <option value="<MORE_DETAILED_CAPTION>">
+                      More Detailed Caption
+                    </option>
+                    <option value="<OCR>">OCR</option>
+                    <option value="<OCR_WITH_REGION>">OCR with Region</option>
+                    <option value="<OD>">Object Detection</option>
+                    <option value="<DENSE_REGION_CAPTION>">
+                      Dense Region Caption
+                    </option>
+                    <option value="<CAPTION_TO_PHRASE_GROUNDING>">
+                      Caption to Phrase Grounding
+                    </option>
+                    {/* <option value="<REFERRING_EXPRESSION_SEGMENTATION>">Referring Expression Segmentation</option> */}
+                    {/* <option value="<REGION_TO_SEGMENTATION>">Region to Segmentation</option> */}
+                    {/* <option value="<OPEN_VOCABULARY_DETECTION>">Open Vocabulary Detection</option> */}
+                    {/* <option value="<REGION_TO_CATEGORY>">Region to Category</option> */}
+                    {/* <option value="<REGION_TO_DESCRIPTION>">Region to Description</option> */}
+                    {/* <option value="<REGION_TO_OCR>">Region to OCR</option> */}
+                    {/* <option value="<REGION_PROPOSAL>">Region Proposal</option> */}
+                  </select>
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-sm mb-0.5">Input Image</span>
+                  <ImageInput
+                    className="flex flex-col items-center border border-gray-300 rounded-md cursor-pointer h-[250px]"
+                    onImageChange={(file, result) => {
+                      worker.current.postMessage({ type: "reset" }); // Reset image cache
+                      setResult(null);
+                      setImage(result);
+                    }}
+                  />
+                </div>
+              </div>
+              <div className="flex flex-col gap-2 w-full max-w-[48%] justify-end">
+                {task === "<CAPTION_TO_PHRASE_GROUNDING>" && (
+                  <div className="flex flex-col">
+                    <span className="text-sm mb-0.5">Text input</span>
+                    <input
+                      className="border rounded-md px-2 py-[3.5px]"
+                      value={text}
+                      onChange={(e) => setText(e.target.value)}
+                    />
+                  </div>
+                )}
+
+                <div className="flex flex-col relative">
+                  <span className="text-sm mb-0.5">Output</span>
+                  <div className="flex justify-center border border-gray-300 rounded-md h-[250px]">
+                    {result?.[task] && (
+                      <>
+                        {typeof result[task] === "string" ? (
+                          <p className="pt-4 px-4 text-center max-h-[205px] overflow-y-auto">
+                            {result[task]}
+                          </p>
+                        ) : (
+                          <pre className="w-full h-full p-2 overflow-y-auto">
+                            {JSON.stringify(result[task], null, 2)}
+                          </pre>
+                        )}
+                        {time && (
+                          <p className="text-sm text-gray-500 absolute bottom-2 bg-white p-1 rounded border">
+                            Execution time: {time.toFixed(2)} ms
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <button
+              className="border px-4 py-2 rounded-lg bg-blue-400 text-white hover:bg-blue-500 disabled:bg-blue-100 disabled:cursor-not-allowed select-none cursor-pointer"
+              onClick={handleClick}
+              disabled={
+                status === "running" || (status !== null && image === null)
+              }
+            >
+              {status === null
+                ? "Load model"
+                : status === "running"
+                  ? "Running..."
+                  : "Run model"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  ) : (
+    <div className="fixed w-screen h-screen bg-black z-10 bg-opacity-[92%] text-white text-2xl font-semibold flex justify-center items-center text-center">
+      WebGPU is not supported
+      <br />
+      by this browser :&#40;
+    </div>
+  );
+}
+
+export default App;
+
+
+
+================================================
+FILE: florence2-webgpu/src/index.css
+================================================
+@import "tailwindcss";
+
+*::-webkit-scrollbar {
+  width: 0.5rem;
+}
+
+*::-webkit-scrollbar-track {
+  border-radius: 9999px;
+  background-color: #f3f4f6;
+  /* bg-gray-100 */
+}
+
+*::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background-color: #d1d5db;
+  /* bg-gray-300 */
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: #6b7280;
+  /* bg-gray-500 */
+}
+
+@media (prefers-color-scheme: dark) {
+  *::-webkit-scrollbar-track {
+    background-color: #374151;
+    /* dark:bg-gray-700 */
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: #4b5563;
+    /* dark:bg-gray-600 */
+  }
+}
+
+
+
+================================================
+FILE: florence2-webgpu/src/main.jsx
+================================================
+import React from "react";
+import ReactDOM from "react-dom/client";
+import App from "./App.jsx";
+import "./index.css";
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+);
+
+
+
+================================================
+FILE: florence2-webgpu/src/worker.js
+================================================
+import {
+  Florence2ForConditionalGeneration,
+  AutoProcessor,
+  AutoTokenizer,
+  RawImage,
+  full,
+} from "@huggingface/transformers";
+
+async function hasFp16() {
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    return adapter.features.has("shader-f16");
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * This class uses the Singleton pattern to ensure that only one instance of the model is loaded.
+ */
+class Florence2Singleton {
+  static model_id = "onnx-community/Florence-2-base-ft";
+
+  static async getInstance(progress_callback = null) {
+    this.processor ??= AutoProcessor.from_pretrained(this.model_id);
+    this.tokenizer ??= AutoTokenizer.from_pretrained(this.model_id);
+
+    this.supports_fp16 ??= await hasFp16();
+    this.model ??= Florence2ForConditionalGeneration.from_pretrained(
+      this.model_id,
+      {
+        dtype: {
+          embed_tokens: this.supports_fp16 ? "fp16" : "fp32",
+          vision_encoder: this.supports_fp16 ? "fp16" : "fp32",
+          encoder_model: "q4", // or 'fp16' or 'fp32'
+          decoder_model_merged: "q4", // or 'fp16' or 'fp32'
+        },
+        device: "webgpu",
+        progress_callback,
+      },
+    );
+
+    return Promise.all([this.model, this.tokenizer, this.processor]);
+  }
+}
+
+async function load() {
+  self.postMessage({
+    status: "loading",
+    data: "Loading model...",
+  });
+
+  // Load the pipeline and save it for future use.
+  const [model, tokenizer, processor] = await Florence2Singleton.getInstance(
+    (x) => {
+      // We also add a progress callback to the pipeline so that we can
+      // track model loading.
+      self.postMessage(x);
+    },
+  );
+
+  self.postMessage({
+    status: "loading",
+    data: "Compiling shaders and warming up model...",
+  });
+
+  // Dummy text and vision inputs
+  const text_inputs = tokenizer("a");
+  const pixel_values = full([1, 3, 768, 768], 0.0);
+
+  // Run model with dummy input to compile shaders
+  await model.generate({
+    ...text_inputs,
+    pixel_values,
+    max_new_tokens: 1,
+  });
+
+  self.postMessage({ status: "ready" });
+}
+
+const TASKS_WITH_INPUTS = ["<CAPTION_TO_PHRASE_GROUNDING>"];
+
+let vision_inputs;
+let image_size;
+async function run({ text, url, task }) {
+  const [model, tokenizer, processor] = await Florence2Singleton.getInstance();
+
+  // Read and preprocess image
+  const start = performance.now();
+  if (!vision_inputs) {
+    // Cache vision inputs when possible
+    const image = await RawImage.fromURL(url);
+    image_size = image.size;
+    vision_inputs = await processor(image);
+  }
+
+  let user_input = task;
+  if (TASKS_WITH_INPUTS.includes(task) && text) {
+    user_input += text;
+  }
+  const prompts = processor.construct_prompts(user_input);
+  const text_inputs = tokenizer(prompts);
+
+  // Generate text
+  const generated_ids = await model.generate({
+    ...text_inputs,
+    ...vision_inputs,
+    max_new_tokens: 128,
+    num_beams: 1,
+    do_sample: false,
+  });
+
+  // Decode generated text
+  const generated_text = tokenizer.batch_decode(generated_ids, {
+    skip_special_tokens: false,
+  })[0];
+
+  // Post-process the generated text
+  const result = processor.post_process_generation(
+    generated_text,
+    task,
+    image_size,
+  );
+
+  const end = performance.now();
+
+  self.postMessage({ status: "complete", result, time: end - start });
+}
+
+// Listen for messages from the main thread
+self.addEventListener("message", async (e) => {
+  const { type, data } = e.data;
+
+  switch (type) {
+    case "load":
+      load();
+      break;
+
+    case "run":
+      run(data);
+      break;
+
+    case "reset":
+      vision_inputs = image_size = null;
+      break;
+  }
+});
+
+
+
+================================================
+FILE: florence2-webgpu/src/components/ImageInput.jsx
+================================================
+import { useState, useRef } from "react";
+
+const EXAMPLE_URL =
+  "https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/beetle.png";
+
+const ImageInput = ({ onImageChange, ...props }) => {
+  const [imagePreview, setImagePreview] = useState(null);
+  const fileInputRef = useRef(null);
+
+  const readFile = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setImagePreview(reader.result);
+      if (onImageChange) {
+        onImageChange(file, reader.result);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleImageChange = (event) => {
+    readFile(event.target.files[0]);
+  };
+
+  const handleDragOver = (event) => {
+    event.preventDefault();
+  };
+
+  const handleDrop = (event) => {
+    event.preventDefault();
+    readFile(event.dataTransfer.files[0]);
+  };
+
+  const handleClick = () => {
+    fileInputRef.current.click();
+  };
+
+  return (
+    <div
+      {...props}
+      onClick={handleClick}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      <input
+        type="file"
+        accept="image/*"
+        onChange={handleImageChange}
+        ref={fileInputRef}
+        className="hidden"
+      />
+      {imagePreview ? (
+        <img
+          src={imagePreview}
+          alt="Selected"
+          className="w-full max-h-[250px] h-full object-contain rounded-md"
+        />
+      ) : (
+        <div className="w-full h-full flex flex-col items-center justify-center border-2 border-dashed border-gray-300 rounded-md">
+          <span className="text-gray-600 text-center m-3">
+            <u>Drag & drop</u> or <u>click</u>
+            <br />
+            to select an image
+          </span>
+          <span
+            className="text-gray-500 text-sm hover:text-gray-800 dark:hover:text-gray-300"
+            onClick={(e) => {
+              e.stopPropagation();
+              setImagePreview(EXAMPLE_URL);
+              onImageChange(null, EXAMPLE_URL);
+            }}
+          >
+            (or <u>try an example</u>)
+          </span>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default ImageInput;
+
+
+
+================================================
+FILE: florence2-webgpu/src/components/Progress.jsx
+================================================
+function formatBytes(size) {
+  const i = size == 0 ? 0 : Math.floor(Math.log(size) / Math.log(1024));
+  return (
+    +(size / Math.pow(1024, i)).toFixed(2) * 1 +
+    ["B", "kB", "MB", "GB", "TB"][i]
+  );
+}
+
+export default function Progress({ text, percentage, total }) {
+  percentage ??= 0;
+  return (
+    <div className="w-full bg-gray-100 dark:bg-gray-700 text-left rounded-lg overflow-hidden mb-0.5">
+      <div
+        className="bg-blue-400 whitespace-nowrap px-1 text-sm"
+        style={{ width: `${percentage}%` }}
+      >
+        {text} ({percentage.toFixed(2)}%
+        {isNaN(total) ? "" : ` of ${formatBytes(total)}`})
+      </div>
+    </div>
+  );
+}
+
+
