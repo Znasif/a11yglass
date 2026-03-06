@@ -249,12 +249,21 @@ class PanoramaProcessor : OnDeviceProcessor() {
                     state.phase = PanoramaPhase.REALITY_PROXY
                     lastAnnouncedNodeLabel = null
                     state.stitchedResult?.let { panorama ->
-                        // Strip must be the same pixel width as the live frame so both images
-                        // compress identically inside FeatureTracker's 512×512 normalisation.
-                        // Using hFOV×PX_PER_DEG (260px) vs frame.width (720px) causes a 2.77×
-                        // x-scale mismatch in descriptor space → false positive matches.
-                        val stripWidthPx = frame.width.coerceAtMost(panorama.width)
-                        localizer?.initialize(panorama, stripWidthPx, frame.height)
+                        // Prefer keyframe-based localization: original captured bitmaps have
+                        // no stitching/blending artifacts, giving much better feature matches
+                        // than strips sliced from the composite panorama.
+                        // Fall back to strip-based only for loaded panoramas (no keyframes).
+                        if (state.keyframes.isNotEmpty()) {
+                            localizer?.initializeWithKeyframes(
+                                state.keyframes.toList(),
+                                panorama.width,
+                                frame.width,
+                                frame.height,
+                            )
+                        } else {
+                            val stripWidthPx = frame.width.coerceAtMost(panorama.width)
+                            localizer?.initialize(panorama, stripWidthPx, frame.height)
+                        }
                     }
                     Log.d(TAG, "Entered Reality Proxy mode — ${state.hierarchyNodes.size} nodes, " +
                         "${state.keyframes.size} keyframes")

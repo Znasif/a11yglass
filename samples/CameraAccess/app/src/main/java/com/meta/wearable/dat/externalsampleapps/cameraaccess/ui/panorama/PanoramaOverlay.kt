@@ -12,7 +12,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -53,8 +53,8 @@ import java.util.Locale
  *
  * Handles:
  * - Panorama image display with FillHeight + BiasAlignment pan
- * - Horizontal swipe: discrete node stepping (PANORAMA_DONE with nodes)
- *                     or continuous pan (PROXY_ACTIVE / no nodes)
+ * - Horizontal swipe: continuous pan (always)
+ * - Vertical swipe:   step through hierarchy nodes (up = next, down = previous)
  * - Node overlay buttons with focus highlight and TalkBack semantics
  * - Live camera cutout in Reality Proxy mode
  * - Floating exit button in Reality Proxy mode
@@ -85,11 +85,6 @@ fun BoxScope.PanoramaOverlay(
     val xFraction = if (streamUiState.captureButtonMode == CaptureButtonMode.PROXY_ACTIVE)
         streamUiState.carouselXFraction else manualXFraction
 
-    // Discrete stepping when nodes are present and not in proxy mode;
-    // continuous pan otherwise.
-    val discreteSwipe = streamUiState.captureButtonMode == CaptureButtonMode.PANORAMA_DONE
-        && streamUiState.hierarchyNodes.isNotEmpty()
-
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         // ── Panorama image ──────────────────────────────────────────────────
         Image(
@@ -97,25 +92,31 @@ fun BoxScope.PanoramaOverlay(
             contentDescription = null,
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(discreteSwipe) {
-                    if (discreteSwipe) {
-                        var accumulated = 0f
-                        detectHorizontalDragGestures(
-                            onDragEnd = { accumulated = 0f },
-                            onDragCancel = { accumulated = 0f },
-                        ) { _, dragAmount ->
-                            accumulated += dragAmount
-                            val threshold = size.width * 0.15f
-                            if (accumulated > threshold) {
-                                onStepNode(-1); accumulated = 0f
-                            } else if (accumulated < -threshold) {
-                                onStepNode(+1); accumulated = 0f
+                .pointerInput(
+                    streamUiState.captureButtonMode,
+                    streamUiState.hierarchyNodes.size,
+                ) {
+                    // Horizontal drag → pan panorama (always).
+                    // Vertical drag   → step through hierarchy nodes (when present).
+                    val hasNodes = streamUiState.hierarchyNodes.isNotEmpty() &&
+                        streamUiState.captureButtonMode != CaptureButtonMode.PROXY_ACTIVE
+                    var accY = 0f
+                    detectDragGestures(
+                        onDragEnd = { accY = 0f },
+                        onDragCancel = { accY = 0f },
+                    ) { _, dragAmount ->
+                        // Horizontal: continuous pan.
+                        manualXFraction = (manualXFraction - dragAmount.x / size.width * 2f)
+                            .coerceIn(0f, 1f)
+                        // Vertical: step nodes.
+                        if (hasNodes) {
+                            accY += dragAmount.y
+                            val threshold = size.height * 0.15f
+                            if (accY > threshold) {
+                                onStepNode(-1); accY = 0f
+                            } else if (accY < -threshold) {
+                                onStepNode(+1); accY = 0f
                             }
-                        }
-                    } else {
-                        detectHorizontalDragGestures { _, dragAmount ->
-                            manualXFraction = (manualXFraction - dragAmount / size.width * 2f)
-                                .coerceIn(0f, 1f)
                         }
                     }
                 },
