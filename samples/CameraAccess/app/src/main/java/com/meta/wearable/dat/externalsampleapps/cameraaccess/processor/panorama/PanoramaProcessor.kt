@@ -142,10 +142,10 @@ class PanoramaProcessor : OnDeviceProcessor() {
             val t0 = System.currentTimeMillis()
 
             // Frame-drop guard: if a previous frame is still being processed,
-            // return the raw frame immediately so the UI stays responsive.
+            // return null so the last strip-annotated frame stays on screen.
             if (!isProcessing.compareAndSet(false, true)) {
                 return@withContext OnDeviceProcessorResult(
-                    processedImage = frame,
+                    processedImage = null,
                     text = null,
                     processingTimeMs = 0
                 )

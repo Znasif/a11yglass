@@ -191,6 +191,12 @@ class StreamViewModel(
                         statusMessage      = "",
                     ) }
                     Log.d(TAG, "Processor changed from $lastProcessorId to ${state.selectedProcessorId}")
+                    // Auto-start local processing for PanoramaProcessor so the strip
+                    // orientation aid (with "Camera button to start" hint) is visible
+                    // immediately, before the user presses the camera button.
+                    if (state.selectedProcessorId == com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor.PROCESSOR_ID) {
+                        startServerStreaming()
+                    }
                 }
                 lastProcessorId = state.selectedProcessorId
             }
