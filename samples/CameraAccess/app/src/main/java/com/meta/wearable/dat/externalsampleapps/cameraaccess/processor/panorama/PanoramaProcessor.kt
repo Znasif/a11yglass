@@ -119,6 +119,8 @@ class PanoramaProcessor : OnDeviceProcessor() {
     val hierarchyNodes: List<HierarchyNode> get() = state.hierarchyNodes
     /** Angular span (degrees) of the current stitched panorama. */
     val panoramaAngularSpanDeg: Float get() = state.panoramaAngularSpanDeg
+    /** Snapshot of accepted keyframes — used by StreamViewModel to save the .glassio sidecar. */
+    val keyframes: List<Keyframe>   get() = state.keyframes.toList()
 
     // ── Overlay paint ────────────────────────────────────────────────────────
     private val statusPaint = Paint().apply {
@@ -486,16 +488,43 @@ class PanoramaProcessor : OnDeviceProcessor() {
      * This is only used for Reality Proxy localization, which is unavailable without
      * live keyframes; overlay display is purely fraction-based and is unaffected.
      */
-    fun loadAndAnalyzePanorama(bitmap: Bitmap) {
+    /**
+     * Load a previously saved panorama bitmap and re-run the Florence scene analysis
+     * pipeline on it, exactly as happens after a live sweep.
+     *
+     * @param bitmap          Full-resolution stitched panorama.
+     * @param glassioKeyframes Original captured keyframes loaded from a `.glassio` sidecar,
+     *                        or empty if no sidecar exists. When non-empty, Reality Proxy will
+     *                        use keyframe-based localization (much more reliable than strip mode).
+     *                        Bitmaps are adopted into [state.keyframes] and recycled on
+     *                        the next [PanoramaState.reset].
+     */
+    fun loadAndAnalyzePanorama(bitmap: Bitmap, glassioKeyframes: List<Keyframe> = emptyList()) {
         val copy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
         state.stitchedResult  = copy
         state.hierarchyNodes  = emptyList()
         state.phase           = PanoramaPhase.IDLE
         hierarchyBuilder.setNodes(emptyList())
         _hierarchyReady.value = false
-        // Infer angular span from pixel width (no keyframes available for loaded panoramas).
-        // Uses the approximate px/deg of the stitched panorama: frame.width / hFov ≈ 720/65.
-        state.panoramaAngularSpanDeg = (copy.width.toFloat() * 65f / 720f).coerceIn(10f, 350f)
+
+        // Replace any existing keyframes with the glassio-loaded ones.
+        state.keyframes.forEach {
+            if (!it.bitmap.isRecycled) it.bitmap.recycle()
+            if (it.thumbnail !== it.bitmap && !it.thumbnail.isRecycled) it.thumbnail.recycle()
+        }
+        state.keyframes.clear()
+        state.keyframes.addAll(glassioKeyframes)
+
+        // Angular span: derive from keyframe FOV if available, otherwise pixel-width heuristic.
+        state.panoramaAngularSpanDeg = if (glassioKeyframes.isNotEmpty()) {
+            val kfBmp = glassioKeyframes.first().bitmap
+            (copy.width.toFloat() * cameraHFovDeg(kfBmp.width, kfBmp.height) / kfBmp.width)
+                .coerceIn(10f, 350f)
+        } else {
+            (copy.width.toFloat() * 65f / 720f).coerceIn(10f, 350f)
+        }
+        Log.d(TAG, "loadAndAnalyzePanorama: ${glassioKeyframes.size} glassio keyframes, " +
+            "span=${"%.1f".format(state.panoramaAngularSpanDeg)}°")
 
         val fp = florenceProcessor
         processorScope.launch {

@@ -153,13 +153,6 @@ class StreamViewModel(
                 }
         }
 
-        // Collect audio playback state
-        viewModelScope.launch {
-            audioPlaybackManager.isPlaying.collect { isPlaying ->
-                _uiState.update { it.copy(isPlayingAudio = isPlaying) }
-            }
-        }
-
         // Collect TTS mute state
         viewModelScope.launch {
             ttsManager.isMuted.collect { isMuted ->
@@ -455,12 +448,14 @@ class StreamViewModel(
             // Auto-save the raw stitch so it can be re-analyzed on load.
             // Skip when this watcher was started for a reload (file already on disk).
             if (autoSave) {
-                val rawStitch = pp.stitchedResult
+                val rawStitch   = pp.stitchedResult
+                val kfSnapshot  = pp.keyframes   // snapshot before any reset
                 if (rawStitch != null) {
                     viewModelScope.launch(Dispatchers.IO) {
-                        panoramaSaveManager.save(rawStitch, n)
+                        val saved = panoramaSaveManager.save(rawStitch, n)
+                        panoramaSaveManager.saveGlassio(saved.id, kfSnapshot, rawStitch.width)
                         refreshSavedPanoramas()
-                        Log.d(TAG, "Auto-saved raw panorama with $n nodes")
+                        Log.d(TAG, "Auto-saved panorama id=${saved.id}, ${kfSnapshot.size} keyframes")
                     }
                 }
             }
@@ -488,11 +483,13 @@ class StreamViewModel(
             ?: return
 
         viewModelScope.launch(Dispatchers.IO) {
-            val bitmap = panoramaSaveManager.load(id) ?: return@launch
+            val bitmap  = panoramaSaveManager.load(id) ?: return@launch
+            val glassio = panoramaSaveManager.loadGlassio(id)  // null if no sidecar
 
-            // Hand the raw stitch to the processor — it will re-run Florence and
-            // signal hierarchyReady when done, just like after a live sweep.
-            pp.loadAndAnalyzePanorama(bitmap)
+            // Hand the raw stitch (and keyframes if available) to the processor.
+            // With keyframes, Reality Proxy uses keyframe mode (much more reliable).
+            // Without them, it falls back to strip mode using the stitched panorama.
+            pp.loadAndAnalyzePanorama(bitmap, glassio ?: emptyList())
 
             _uiState.update { it.copy(
                 carouselPanorama       = bitmap,

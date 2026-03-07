@@ -42,7 +42,6 @@ data class StreamUiState(
     // Audio streaming state
     val isAudioStreaming: Boolean = false,
     val isAudioMuted: Boolean = false,
-    val isPlayingAudio: Boolean = false,  // Playing back Gemini audio response
     
     // Voice command state
     val voiceTranscript: String = "",      // Last 50 chars of transcript

@@ -56,8 +56,22 @@ class PanoramaLocalizer {
     private var lastSetIdx        = -1
 
     companion object {
-        private const val TAG           = "PanoramaLocalizer"
-        private const val SEARCH_RADIUS = 2
+        private const val TAG                = "PanoramaLocalizer"
+        private const val SEARCH_RADIUS      = 2
+        /**
+         * Both the reference (strip/keyframe) and the live frame are downsampled
+         * by this factor before being passed to FeatureTracker, cutting inference
+         * time roughly proportionally. Must be < 1f so kfRef/strip bitmaps are
+         * always new copies (owned by this class and recycled in reset/reinit).
+         */
+        private const val LOCALIZATION_SCALE = 0.5f
+    }
+
+    /** Returns a new bitmap downsampled by [LOCALIZATION_SCALE]. Always a new allocation. */
+    private fun downsample(src: Bitmap): Bitmap {
+        val w = (src.width  * LOCALIZATION_SCALE).toInt().coerceAtLeast(1)
+        val h = (src.height * LOCALIZATION_SCALE).toInt().coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(src, w, h, true)
     }
 
     // ── Public initialization ─────────────────────────────────────────────────
@@ -82,6 +96,7 @@ class PanoramaLocalizer {
     ) {
         strips.forEach { it.bitmap.recycle() }
         strips.clear()
+        kfRefs.forEach { it.bitmap.recycle() }   // downsampled copies — always owned here
         kfRefs.clear()
         resetScanState()
         useKeyframes = true
@@ -91,7 +106,7 @@ class PanoramaLocalizer {
         kfMinAngle  = keyframes.minOfOrNull { it.angleDeg } ?: 0f
         kfPxPerDeg  = frameWidth.toFloat() / cameraHFovDeg(frameWidth, frameHeight)
 
-        for (kf in keyframes) kfRefs.add(KfRef(kf.bitmap, kf.angleDeg))
+        for (kf in keyframes) kfRefs.add(KfRef(downsample(kf.bitmap), kf.angleDeg))
 
         Log.d(TAG, "KF init: ${kfRefs.size} keyframes, " +
             "pxPerDeg=${"%.2f".format(kfPxPerDeg)} " +
@@ -109,6 +124,7 @@ class PanoramaLocalizer {
     fun initialize(panorama: Bitmap, stripWidthPx: Int, frameHeight: Int = panorama.height) {
         strips.forEach { it.bitmap.recycle() }
         strips.clear()
+        kfRefs.forEach { it.bitmap.recycle() }   // downsampled copies — always owned here
         kfRefs.clear()
         resetScanState()
         useKeyframes = false
@@ -121,8 +137,9 @@ class PanoramaLocalizer {
 
         var x = 0
         while (x + this.stripWidthPx <= panorama.width) {
+            val crop = Bitmap.createBitmap(panorama, x, yOffset, this.stripWidthPx, cropH)
             strips.add(Strip(
-                bitmap        = Bitmap.createBitmap(panorama, x, yOffset, this.stripWidthPx, cropH),
+                bitmap        = downsample(crop).also { if (it !== crop) crop.recycle() },
                 startX        = x,
                 panoramaWidth = panorama.width,
             ))
@@ -130,7 +147,7 @@ class PanoramaLocalizer {
         }
         if (strips.isEmpty()) {
             val crop = Bitmap.createBitmap(panorama, 0, yOffset, panorama.width, cropH)
-            strips.add(Strip(crop, 0, panorama.width))
+            strips.add(Strip(downsample(crop).also { if (it !== crop) crop.recycle() }, 0, panorama.width))
         }
 
         Log.d(TAG, "Strip init: ${strips.size} strips × ${this.stripWidthPx}×${cropH}px " +
@@ -160,17 +177,22 @@ class PanoramaLocalizer {
 
         // Skip redundant setReferenceFrame when locked on the same keyframe.
         if (idx != lastSetIdx) {
-            featureTracker.setReferenceFrame(kf.bitmap, emptyList())
+            featureTracker.setReferenceFrame(kf.bitmap, emptyList())  // kf.bitmap is already downsampled
             lastSetIdx = idx
         }
 
-        val t0 = System.currentTimeMillis()
-        val H  = featureTracker.computeHomography(liveFrame)
-        val matchMs = System.currentTimeMillis() - t0
+        val scaledLive = downsample(liveFrame)
+        val scaledW    = scaledLive.width
+        val scaledH    = scaledLive.height
+        val t0         = System.currentTimeMillis()
+        val H          = featureTracker.computeHomography(scaledLive)
+        val matchMs    = System.currentTimeMillis() - t0
+        scaledLive.recycle()
 
         if (H != null) {
             // shiftPx > 0 → live camera has panned RIGHT relative to this keyframe.
-            val shiftPx  = extractHorizontalShift(H, liveFrame.width, liveFrame.height)
+            // H is in downsampled pixel space; scale back to original for all downstream math.
+            val shiftPx  = extractHorizontalShift(H, scaledW, scaledH) / LOCALIZATION_SCALE
             val shiftDeg = if (kfPxPerDeg > 0f) shiftPx / kfPxPerDeg else 0f
 
             // Accept the match only if the live frame meaningfully overlaps the keyframe.
@@ -227,25 +249,34 @@ class PanoramaLocalizer {
         val strip = strips[idx]
         val mode  = if (lastBestIdx >= 0) "LOCKED" else "SCAN[$scanIdx/${strips.size}]"
 
-        featureTracker.setReferenceFrame(strip.bitmap, emptyList())
-        val t0 = System.currentTimeMillis()
-        val H  = featureTracker.computeHomography(liveFrame)
-        val matchMs = System.currentTimeMillis() - t0
+        featureTracker.setReferenceFrame(strip.bitmap, emptyList())  // strip.bitmap is already downsampled
+        val scaledLive = downsample(liveFrame)
+        val scaledW    = scaledLive.width
+        val scaledH    = scaledLive.height
+        val t0         = System.currentTimeMillis()
+        val H          = featureTracker.computeHomography(scaledLive)
+        val matchMs    = System.currentTimeMillis() - t0
+        scaledLive.recycle()
+
+        // strip.bitmap.width is the downsampled strip width — the correct bounds for px.
+        val scaledStripW = strip.bitmap.width.toFloat()
 
         if (H != null) {
-            val px = invertAndProject(H, liveFrame.width, liveFrame.height)
-            if (px != null && px >= 0f && px <= stripWidthPx) {
+            val px = invertAndProject(H, scaledW, scaledH)
+            if (px != null && px >= 0f && px <= scaledStripW) {
                 lastBestIdx = idx
-                val fraction = (strip.startX + px) / strip.panoramaWidth.toFloat()
+                // Convert px from downsampled strip space back to original panorama coordinates.
+                val pxOriginal = px / LOCALIZATION_SCALE
+                val fraction   = (strip.startX + pxOriginal) / strip.panoramaWidth.toFloat()
                 lastKnownFraction = fraction.coerceIn(0f, 1f)
                 Log.d(TAG, "[$mode] Strip $idx/${strips.size} startX=${strip.startX} " +
-                    "px=${"%.0f".format(px)}/$stripWidthPx " +
+                    "px=${"%.0f".format(pxOriginal)}/$stripWidthPx " +
                     "→ frac=${"%.3f".format(lastKnownFraction!!)} (${matchMs}ms)")
                 return lastKnownFraction
             } else {
+                val pxLog = px?.let { "%.0f".format(it / LOCALIZATION_SCALE) } ?: "null"
                 Log.d(TAG, "[$mode] Strip $idx/${strips.size}: H ok " +
-                    "px=${px?.let { "%.0f".format(it) } ?: "null"} " +
-                    "out-of-bounds [0..$stripWidthPx] — miss (${matchMs}ms)")
+                    "px=$pxLog out-of-bounds [0..$stripWidthPx] — miss (${matchMs}ms)")
             }
         } else {
             Log.d(TAG, "[$mode] Strip $idx/${strips.size}: H=null (no feature match) — miss (${matchMs}ms)")
@@ -292,6 +323,7 @@ class PanoramaLocalizer {
     fun reset() {
         strips.forEach { it.bitmap.recycle() }
         strips.clear()
+        kfRefs.forEach { it.bitmap.recycle() }   // downsampled copies — always owned here
         kfRefs.clear()
         stripWidthPx = 0
         kfPanoramaW  = 0; kfFrameW = 0; kfMinAngle = 0f; kfPxPerDeg = 0f

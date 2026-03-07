@@ -51,11 +51,10 @@ fun cameraHFovDeg(frameWidth: Int, frameHeight: Int): Float {
 
 // ── Phase state machine ──────────────────────────────────────────────────────
 enum class PanoramaPhase {
-    IDLE,              // No active session
-    CAPTURING,         // Sweep in progress (Phase 1)
-    STITCHING,         // Stitching running synchronously inside process()
-    HIERARCHY_BUILDING,// Hierarchy builder running in processorScope (unused as observable state for now)
-    REALITY_PROXY,     // Interactive localization mode (Phase 3)
+    IDLE,          // No active session
+    CAPTURING,     // Sweep in progress (Phase 1)
+    STITCHING,     // Stitching running synchronously inside process()
+    REALITY_PROXY, // Interactive localization mode (Phase 3)
 }
 
 // ── Package-level geometry helpers ───────────────────────────────────────────
