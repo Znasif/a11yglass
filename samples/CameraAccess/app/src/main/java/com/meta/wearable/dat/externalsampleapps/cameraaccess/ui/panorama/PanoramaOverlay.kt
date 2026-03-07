@@ -174,18 +174,25 @@ fun BoxScope.PanoramaOverlay(
             streamUiState.videoFrame?.let { live ->
                 val cutoutW = maxWidth * POINTING_FRACTION
                 val cutoutH = cutoutW * live.height / live.width
+                // Compute at let-scope while BoxWithConstraintsScope is still the receiver.
+                val scaledLiveW = maxHeight * live.width / live.height
+                val scaledLiveH = maxHeight
                 Box(
                     modifier = Modifier
                         .size(cutoutW, cutoutH)
                         .align(Alignment.Center)
                         .border(2.dp, Color.White, RoundedCornerShape(4.dp))
                         .clip(RoundedCornerShape(4.dp)),
+                    contentAlignment = Alignment.Center,
                 ) {
+                    // Render the live frame at the same FillHeight scale as the panorama,
+                    // then let the parent Box clip to the cutout hole — like paper covering
+                    // the screen with a small window cut in the middle.
                     Image(
                         bitmap = live.asImageBitmap(),
                         contentDescription = null,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.requiredSize(scaledLiveW, scaledLiveH),
+                        contentScale = ContentScale.FillBounds,
                     )
                 }
             }

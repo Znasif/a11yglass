@@ -154,8 +154,9 @@ class PanoramaLocalizer {
     private fun localizeWithKeyframes(liveFrame: Bitmap, featureTracker: FeatureTracker): Float? {
         if (kfRefs.isEmpty()) return null
 
-        val idx = if (lastBestIdx >= 0) lastBestIdx else scanIdx
-        val kf  = kfRefs[idx]
+        val idx  = if (lastBestIdx >= 0) lastBestIdx else scanIdx
+        val kf   = kfRefs[idx]
+        val mode = if (lastBestIdx >= 0) "LOCKED" else "SCAN[$scanIdx/${kfRefs.size}]"
 
         // Skip redundant setReferenceFrame when locked on the same keyframe.
         if (idx != lastSetIdx) {
@@ -163,11 +164,14 @@ class PanoramaLocalizer {
             lastSetIdx = idx
         }
 
-        val H = featureTracker.computeHomography(liveFrame)
+        val t0 = System.currentTimeMillis()
+        val H  = featureTracker.computeHomography(liveFrame)
+        val matchMs = System.currentTimeMillis() - t0
 
         if (H != null) {
             // shiftPx > 0 → live camera has panned RIGHT relative to this keyframe.
-            val shiftPx = extractHorizontalShift(H, liveFrame.width, liveFrame.height)
+            val shiftPx  = extractHorizontalShift(H, liveFrame.width, liveFrame.height)
+            val shiftDeg = if (kfPxPerDeg > 0f) shiftPx / kfPxPerDeg else 0f
 
             // Accept the match only if the live frame meaningfully overlaps the keyframe.
             // |shiftPx| ≤ frameWidth means at least some content is shared.
@@ -180,13 +184,23 @@ class PanoramaLocalizer {
                 //   + shiftPx           = additional rightward offset
                 val panoramaX = (kf.angleDeg - kfMinAngle) * kfPxPerDeg +
                     liveFrame.width / 2f + shiftPx
-                val fraction = (panoramaX / kfPanoramaW).coerceIn(0f, 1f)
+                val fraction  = (panoramaX / kfPanoramaW).coerceIn(0f, 1f)
+                val estAngle  = kf.angleDeg + shiftDeg
                 lastKnownFraction = fraction
 
-                Log.d(TAG, "KF $idx (${kf.angleDeg}°) " +
-                    "shift=${shiftPx.toInt()}px → fraction=${"%.3f".format(fraction)}")
+                Log.d(TAG, "[$mode] KF $idx/${kfRefs.size} kf=${kf.angleDeg}° " +
+                    "shift=${"%.1f".format(shiftPx)}px (${"%.1f".format(shiftDeg)}°) " +
+                    "→ est=${"%.1f".format(estAngle)}° frac=${"%.3f".format(fraction)} " +
+                    "(${matchMs}ms)")
                 return fraction
+            } else {
+                Log.d(TAG, "[$mode] KF $idx/${kfRefs.size} kf=${kf.angleDeg}° " +
+                    "shift=${"%.1f".format(shiftPx)}px EXCEEDS frame width $kfFrameW — rejected " +
+                    "(${matchMs}ms)")
             }
+        } else {
+            Log.d(TAG, "[$mode] KF $idx/${kfRefs.size} kf=${kf.angleDeg}° " +
+                "H=null (no feature match) (${matchMs}ms)")
         }
 
         // Miss: advance the scan.
@@ -194,9 +208,10 @@ class PanoramaLocalizer {
             scanIdx     = (lastBestIdx - SEARCH_RADIUS).coerceAtLeast(0)
             lastBestIdx = -1
             lastSetIdx  = -1
-            Log.d(TAG, "KF lock lost on idx=$idx — rescanning from $scanIdx")
+            Log.d(TAG, "KF lock lost on idx=$idx (${kf.angleDeg}°) — rescanning from $scanIdx")
         } else {
             scanIdx = (scanIdx + 1) % kfRefs.size
+            Log.v(TAG, "KF scan advance → $scanIdx/${kfRefs.size}")
         }
 
         // Return last known fraction so the pointer stays visible during scan.
@@ -210,9 +225,12 @@ class PanoramaLocalizer {
 
         val idx   = if (lastBestIdx >= 0) lastBestIdx else scanIdx
         val strip = strips[idx]
+        val mode  = if (lastBestIdx >= 0) "LOCKED" else "SCAN[$scanIdx/${strips.size}]"
 
         featureTracker.setReferenceFrame(strip.bitmap, emptyList())
-        val H = featureTracker.computeHomography(liveFrame)
+        val t0 = System.currentTimeMillis()
+        val H  = featureTracker.computeHomography(liveFrame)
+        val matchMs = System.currentTimeMillis() - t0
 
         if (H != null) {
             val px = invertAndProject(H, liveFrame.width, liveFrame.height)
@@ -220,9 +238,17 @@ class PanoramaLocalizer {
                 lastBestIdx = idx
                 val fraction = (strip.startX + px) / strip.panoramaWidth.toFloat()
                 lastKnownFraction = fraction.coerceIn(0f, 1f)
-                Log.d(TAG, "Strip $idx px=${"%.0f".format(px)} → fraction=${"%.3f".format(lastKnownFraction!!)}")
+                Log.d(TAG, "[$mode] Strip $idx/${strips.size} startX=${strip.startX} " +
+                    "px=${"%.0f".format(px)}/$stripWidthPx " +
+                    "→ frac=${"%.3f".format(lastKnownFraction!!)} (${matchMs}ms)")
                 return lastKnownFraction
+            } else {
+                Log.d(TAG, "[$mode] Strip $idx/${strips.size}: H ok " +
+                    "px=${px?.let { "%.0f".format(it) } ?: "null"} " +
+                    "out-of-bounds [0..$stripWidthPx] — miss (${matchMs}ms)")
             }
+        } else {
+            Log.d(TAG, "[$mode] Strip $idx/${strips.size}: H=null (no feature match) — miss (${matchMs}ms)")
         }
 
         if (lastBestIdx >= 0) {
@@ -231,6 +257,7 @@ class PanoramaLocalizer {
             Log.d(TAG, "Strip lock lost on idx=$idx — rescanning from $scanIdx")
         } else {
             scanIdx = (scanIdx + 1) % strips.size
+            Log.v(TAG, "Strip scan advance → $scanIdx/${strips.size}")
         }
 
         return lastKnownFraction
