@@ -452,10 +452,20 @@ class StreamViewModel(
                 val kfSnapshot  = pp.keyframes   // snapshot before any reset
                 if (rawStitch != null) {
                     viewModelScope.launch(Dispatchers.IO) {
-                        val saved = panoramaSaveManager.save(rawStitch, n)
-                        panoramaSaveManager.saveGlassio(saved.id, kfSnapshot, rawStitch.width)
+                        val saved    = panoramaSaveManager.save(rawStitch, n)
+                        val nodes    = pp.hierarchyNodes
+                        panoramaSaveManager.saveGlassio(
+                            id               = saved.id,
+                            keyframes        = kfSnapshot,
+                            panoramaWidth    = rawStitch.width,
+                            nodes            = nodes,
+                            panoramaHeight   = rawStitch.height,
+                            shortDescription = nodes.firstOrNull()?.description ?: "",
+                            longDescription  = "",
+                            title            = "",
+                        )
                         refreshSavedPanoramas()
-                        Log.d(TAG, "Auto-saved panorama id=${saved.id}, ${kfSnapshot.size} keyframes")
+                        Log.d(TAG, "Auto-saved panorama id=${saved.id}, ${kfSnapshot.size} kf, ${nodes.size} nodes")
                     }
                 }
             }
@@ -489,7 +499,7 @@ class StreamViewModel(
             // Hand the raw stitch (and keyframes if available) to the processor.
             // With keyframes, Reality Proxy uses keyframe mode (much more reliable).
             // Without them, it falls back to strip mode using the stitched panorama.
-            pp.loadAndAnalyzePanorama(bitmap, glassio ?: emptyList())
+            pp.loadAndAnalyzePanorama(bitmap, glassio?.keyframes ?: emptyList())
 
             _uiState.update { it.copy(
                 carouselPanorama       = bitmap,

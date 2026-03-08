@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.foundation.shape.GenericShape
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.Role
@@ -132,39 +133,78 @@ fun BoxScope.PanoramaOverlay(
         val viewOffsetX: Dp = (maxWidth - displayedW) * xFraction
 
         // ── Node overlay buttons ────────────────────────────────────────────
+        // Polygon shape when segmentation data is available; rounded-rect fallback otherwise.
+        // No text on buttons — labels live in the slide-in description list (step 5).
+        val density = androidx.compose.ui.platform.LocalDensity.current
         streamUiState.hierarchyNodes.forEachIndexed { idx, node ->
-            val centerX = viewOffsetX + displayedW * node.panoramaXFraction
-            val nodeW   = maxOf(displayedW * node.panoramaWidthFraction, 72.dp)
-            val left    = centerX - nodeW / 2
-            if (left > maxWidth || left + nodeW < 0.dp) return@forEachIndexed
-            val centerY = maxHeight * node.panoramaYFraction
-            val nodeH   = 36.dp
-            val top     = (centerY - nodeH / 2).coerceIn(0.dp, maxHeight - nodeH)
-            val color       = Color(NODE_COLORS[idx % NODE_COLORS.size])
             val isFocused   = idx == currentNodeIndex
+            val rawColor    = if (node.color != android.graphics.Color.TRANSPARENT)
+                                  node.color
+                              else NODE_COLORS[idx % NODE_COLORS.size]
+            val color       = Color(rawColor)
             val borderColor = if (isFocused) Color.Yellow else Color.White.copy(alpha = 0.7f)
             val borderWidth = if (isFocused) 2.dp else 1.dp
-            Box(
-                modifier = Modifier
-                    .offset(x = left, y = top)
-                    .size(nodeW, nodeH)
-                    .border(borderWidth, borderColor, RoundedCornerShape(8.dp))
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(color.copy(alpha = if (isFocused) 0.95f else 0.75f))
-                    .semantics(mergeDescendants = true) {
-                        contentDescription = node.label
-                        role = Role.Button
+            val alpha       = if (isFocused) 0.85f else 0.55f
+
+            val pts = node.polygonXY
+            if (pts != null && pts.size >= 6) {
+                // ── Polygon button ──────────────────────────────────────────
+                // Pre-compute polygon vertices in pixels (GenericShape has no Density context).
+                // x_px = (viewOffsetX + displayedW * xFrac).toPx()
+                // y_px = (maxHeight * yFrac).toPx()
+                val polyPx = with(density) {
+                    FloatArray(pts.size) { i ->
+                        if (i % 2 == 0) (viewOffsetX + displayedW * pts[i]).toPx()
+                        else            (maxHeight * pts[i]).toPx()
                     }
-                    .clickable { manualXFraction = node.panoramaXFraction }
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = node.label,
-                    color = Color.White,
-                    fontSize = 10.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                }
+
+                // Cull: skip if all X coords are off-screen.
+                val screenW = with(density) { maxWidth.toPx() }
+                if (polyPx.filterIndexed { i, _ -> i % 2 == 0 }.all { it > screenW } ||
+                    polyPx.filterIndexed { i, _ -> i % 2 == 0 }.all { it < 0f }) return@forEachIndexed
+
+                val shape = GenericShape { _, _ ->
+                    moveTo(polyPx[0], polyPx[1])
+                    for (i in 2 until polyPx.size - 1 step 2) lineTo(polyPx[i], polyPx[i + 1])
+                    close()
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(shape)
+                        .background(color.copy(alpha = alpha))
+                        .border(borderWidth, borderColor, shape)
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = node.label
+                            role = Role.Button
+                        }
+                        .clickable { manualXFraction = node.panoramaXFraction },
+                )
+            } else {
+                // ── Bbox fallback (rounded rect) ────────────────────────────
+                val centerX = viewOffsetX + displayedW * node.panoramaXFraction
+                val nodeW   = maxOf(displayedW * node.panoramaWidthFraction, 72.dp)
+                val left    = centerX - nodeW / 2
+                if (left > maxWidth || left + nodeW < 0.dp) return@forEachIndexed
+                val centerY = maxHeight * node.panoramaYFraction
+                val nodeH   = maxOf(maxHeight * node.panoramaHeightFraction, 36.dp)
+                val top     = (centerY - nodeH / 2).coerceIn(0.dp, maxHeight - nodeH)
+                val shape   = RoundedCornerShape(8.dp)
+
+                Box(
+                    modifier = Modifier
+                        .offset(x = left, y = top)
+                        .size(nodeW, nodeH)
+                        .clip(shape)
+                        .background(color.copy(alpha = alpha))
+                        .border(borderWidth, borderColor, shape)
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = node.label
+                            role = Role.Button
+                        }
+                        .clickable { manualXFraction = node.panoramaXFraction },
                 )
             }
         }
@@ -284,11 +324,23 @@ fun PanoramaPickerDialog(
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = Color.White,
                                 )
-                                Text(
-                                    text = "${pano.nodeCount} region${if (pano.nodeCount == 1) "" else "s"}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color.Gray,
-                                )
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = "${pano.nodeCount} region${if (pano.nodeCount == 1) "" else "s"}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color.Gray,
+                                    )
+                                    if (pano.hasGlassio) {
+                                        Text(
+                                            text = "keyframes",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFF69F0AE),
+                                        )
+                                    }
+                                }
                             }
                             IconButton(
                                 onClick = { onDelete(pano.id) },

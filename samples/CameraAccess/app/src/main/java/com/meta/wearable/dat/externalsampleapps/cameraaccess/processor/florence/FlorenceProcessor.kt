@@ -21,6 +21,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
@@ -242,20 +243,8 @@ class FlorenceProcessor : OnDeviceProcessor() {
             try {
                 Log.d(TAG, "process(): frame ${frame.width}×${frame.height}")
                 val b64 = encodeFrame(frame)
-                // JPEG magic bytes FFD8FF → base64 prefix "/9j/" — verify encoding is correct.
-                Log.d(TAG, "process(): encoded ${b64.length} base64 chars  prefix='${b64.take(8)}'  suffix='${b64.takeLast(4)}'  — calling runInference")
-                val deferred = CompletableDeferred<String?>()
-                pendingResult = deferred
-
-                // evaluateJavascript must run on the main thread.
-                withContext(Dispatchers.Main) {
-                    webView?.evaluateJavascript(
-                        "window.runInference('data:image/jpeg;base64,$b64')",
-                        null
-                    )
-                }
-
-                val json = withTimeoutOrNull(INFERENCE_TIMEOUT_MS) { deferred.await() }
+                Log.d(TAG, "process(): encoded ${b64.length} base64 chars  prefix='${b64.take(8)}'  — calling runInference")
+                val json = runInferenceRaw("data:image/jpeg;base64,$b64", "<DENSE_REGION_CAPTION>")
 
                 if (json == null) {
                     Log.w(TAG, "process(): inference timed out after ${INFERENCE_TIMEOUT_MS / 1000}s")
@@ -301,58 +290,127 @@ class FlorenceProcessor : OnDeviceProcessor() {
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    /** Encode [frame] as a base64 JPEG string. */
-    private fun encodeFrame(frame: Bitmap): String {
+    /** Encode [bitmap] as a base64 JPEG string for WebView transfer. */
+    private fun encodeFrame(bitmap: Bitmap): String {
         val baos = ByteArrayOutputStream()
-        frame.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, baos)
+        bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, baos)
         return Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
     }
 
     /**
-     * Parse the JSON returned by `post_process_generation()`.
+     * Core inference call. Sends [imageDataUrl] to the WebView with the given
+     * [task] token and optional [extraPrompt], then suspends until the JS bridge
+     * fires [onInferenceResult] or the timeout elapses.
      *
-     * Expected structure:
-     * ```json
-     * {
-     *   "<DENSE_REGION_CAPTION>": {
-     *     "bboxes": [[x1, y1, x2, y2], …],
-     *     "labels": ["a coffee mug", …]
-     *   }
-     * }
-     * ```
-     * Coordinates are in the original frame's pixel space (Transformers.js
-     * scales the 0–999 loc tokens using the image dimensions we passed).
+     * Returns the raw JSON string or null on timeout/error.
+     * Caller is responsible for the [isProcessing] guard.
      */
-    private fun parseResult(json: String): List<RegionCaption> {
+    private suspend fun runInferenceRaw(
+        imageDataUrl: String,
+        task: String,
+        extraPrompt: String? = null,
+    ): String? {
+        val deferred = CompletableDeferred<String?>()
+        pendingResult = deferred
+
+        val extraArg = if (extraPrompt != null) ", '${extraPrompt.replace("'", "\\'")}'" else ", null"
+        withContext(Dispatchers.Main) {
+            webView?.evaluateJavascript(
+                "window.runInference('$imageDataUrl', '$task'$extraArg)",
+                null
+            )
+        }
+        return withTimeoutOrNull(INFERENCE_TIMEOUT_MS) { deferred.await() }
+    }
+
+    // ── Result parsers ────────────────────────────────────────────────────────
+
+    /**
+     * Parse bbox-style response:
+     * `{ "<TASK>": { "bboxes": [[x1,y1,x2,y2],…], "labels": ["…",…] } }`
+     */
+    private fun parseBboxResult(json: String, task: String): List<RegionCaption> {
         return try {
-            val root       = JSONObject(json)
-            val taskResult = root.getJSONObject("<DENSE_REGION_CAPTION>")
+            val taskResult = JSONObject(json).getJSONObject(task)
             val bboxArray  = taskResult.getJSONArray("bboxes")
             val labelArray = taskResult.getJSONArray("labels")
             val count      = minOf(bboxArray.length(), labelArray.length())
-
             (0 until count).mapNotNull { i ->
-                val bboxEntry = bboxArray.get(i)
-                val bbox = when (bboxEntry) {
-                    is org.json.JSONArray -> bboxEntry
-                    else -> return@mapNotNull null
-                }
-                if (bbox.length() < 4) return@mapNotNull null
+                val b = bboxArray.get(i) as? JSONArray ?: return@mapNotNull null
+                if (b.length() < 4) return@mapNotNull null
                 RegionCaption(
                     bbox  = RectF(
-                        bbox.getDouble(0).toFloat(),
-                        bbox.getDouble(1).toFloat(),
-                        bbox.getDouble(2).toFloat(),
-                        bbox.getDouble(3).toFloat()
+                        b.getDouble(0).toFloat(), b.getDouble(1).toFloat(),
+                        b.getDouble(2).toFloat(), b.getDouble(3).toFloat(),
                     ),
-                    label = labelArray.getString(i)
+                    label = labelArray.getString(i),
                 )
             }
         } catch (e: Exception) {
-            Log.e(TAG, "parseResult error: ${e.message} — raw: ${json.take(200)}")
+            Log.e(TAG, "parseBboxResult($task) error: ${e.message} — raw: ${json.take(200)}")
             emptyList()
         }
     }
+
+    /**
+     * Parse segmentation response:
+     * `{ "<TASK>": { "polygons": [[[x,y],…],…], "labels": ["…",…] } }`
+     *
+     * Each polygon is returned as a flat FloatArray `[x0,y0, x1,y1, …]`.
+     */
+    private fun parseSegmentationResult(json: String, task: String): List<Pair<FloatArray, String>> {
+        return try {
+            val taskResult   = JSONObject(json).getJSONObject(task)
+            val polygonsArr  = taskResult.getJSONArray("polygons")
+            val labelArray   = taskResult.getJSONArray("labels")
+            val count        = minOf(polygonsArr.length(), labelArray.length())
+            (0 until count).mapNotNull { i ->
+                val polyGroup = polygonsArr.get(i) as? JSONArray ?: return@mapNotNull null
+                if (polyGroup.length() == 0) return@mapNotNull null
+                // Normalise nesting:
+                //   polygons[i] = [[x,y],[x,y],…]           → pointsArr = polyGroup
+                //   polygons[i] = [[[x,y],[x,y],…]]         → pointsArr = polyGroup[0]
+                //   polygons[i] = [[[[x,y],…]]]  (rare)     → pointsArr = polyGroup[0][0]
+                val first = polyGroup.get(0) as? JSONArray ?: return@mapNotNull null
+                val pointsArr: JSONArray = if (first.length() > 0 && first.get(0) is JSONArray) {
+                    // polyGroup[0] is itself an array of points → polyGroup is the wrapper
+                    val second = first.get(0) as? JSONArray ?: return@mapNotNull null
+                    if (second.length() > 0 && second.get(0) is JSONArray) second.get(0) as JSONArray
+                    else first
+                } else {
+                    // polyGroup[0] is a [x, y] pair → polyGroup is the points array
+                    polyGroup
+                }
+                val pts = FloatArray(pointsArr.length() * 2)
+                for (j in 0 until pointsArr.length()) {
+                    val pt = pointsArr.getJSONArray(j)
+                    pts[j * 2]     = pt.getDouble(0).toFloat()
+                    pts[j * 2 + 1] = pt.getDouble(1).toFloat()
+                }
+                pts to labelArray.getString(i)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "parseSegmentationResult($task) error: ${e.message} — raw: ${json.take(200)}")
+            emptyList()
+        }
+    }
+
+    /**
+     * Parse plain-string response:
+     * `{ "<TASK>": "some text" }`
+     */
+    private fun parseStringResult(json: String, task: String): String? {
+        return try {
+            JSONObject(json).optString(task).ifEmpty { null }
+        } catch (e: Exception) {
+            Log.e(TAG, "parseStringResult($task) error: ${e.message}")
+            null
+        }
+    }
+
+    // Kept for backward compat with process() and analyzeRegions() callers.
+    private fun parseResult(json: String): List<RegionCaption> =
+        parseBboxResult(json, "<DENSE_REGION_CAPTION>")
 
     /** Draw region bounding boxes + labels onto a mutable copy of [frame]. */
     private fun drawRegions(frame: Bitmap, regions: List<RegionCaption>): Bitmap {
@@ -429,17 +487,7 @@ class FlorenceProcessor : OnDeviceProcessor() {
                 Log.d(TAG, "analyzeRegions(): encoded ${b64.length} base64 chars — calling runInference")
                 if (scaleFactor < 1f) scaled.recycle()
 
-                val deferred = CompletableDeferred<String?>()
-                pendingResult = deferred
-
-                withContext(Dispatchers.Main) {
-                    webView?.evaluateJavascript(
-                        "window.runInference('data:image/jpeg;base64,$b64')",
-                        null
-                    )
-                }
-
-                val json = withTimeoutOrNull(INFERENCE_TIMEOUT_MS) { deferred.await() }
+                val json = runInferenceRaw("data:image/jpeg;base64,$b64", "<DENSE_REGION_CAPTION>")
                 if (json == null) {
                     Log.w(TAG, "analyzeRegions(): inference timed out after ${INFERENCE_TIMEOUT_MS / 1000}s")
                     return@withContext emptyList()
@@ -460,6 +508,149 @@ class FlorenceProcessor : OnDeviceProcessor() {
             } catch (e: Exception) {
                 Log.e(TAG, "analyzeRegions() error: ${e.message}", e)
                 emptyList()
+            } finally {
+                isProcessing.set(false)
+            }
+        }
+    }
+
+    /**
+     * Segment a specific region of [bitmap] defined by [bbox] (pixels in [bitmap]'s space).
+     *
+     * Sends `<REGION_TO_SEGMENTATION>` with the bbox encoded as Florence's loc-token prompt.
+     * Returns a list of (polygon as flat [x0,y0,x1,y1,…] in [bitmap]'s pixel space, label).
+     * Returns empty if not ready, another inference is running, or the model finds nothing.
+     */
+    suspend fun segmentRegion(bitmap: Bitmap, bbox: RectF): List<Pair<FloatArray, String>> {
+        if (!modelReady.get()) return emptyList()
+        if (!isProcessing.compareAndSet(false, true)) return emptyList()
+
+        return withContext(Dispatchers.Default) {
+            var crop: Bitmap? = null
+            var scaled: Bitmap? = null
+            try {
+                // Crop to the bbox + 30 % padding on each side so Florence sees the
+                // object in context but at a zoom level where it fills most of the image.
+                // Running on the full (panorama-wide) bitmap with small loc tokens
+                // consistently fails — Florence needs the object to be prominent.
+                val padFrac   = 0.3f
+                val cropLeft  = (bbox.left   - bbox.width()  * padFrac).coerceAtLeast(0f).toInt()
+                val cropTop   = (bbox.top    - bbox.height() * padFrac).coerceAtLeast(0f).toInt()
+                val cropRight = (bbox.right  + bbox.width()  * padFrac).coerceAtMost(bitmap.width.toFloat()).toInt()
+                val cropBot   = (bbox.bottom + bbox.height() * padFrac).coerceAtMost(bitmap.height.toFloat()).toInt()
+                val cropW     = (cropRight - cropLeft).coerceAtLeast(1)
+                val cropH     = (cropBot   - cropTop ).coerceAtLeast(1)
+                crop = Bitmap.createBitmap(bitmap, cropLeft, cropTop, cropW, cropH)
+
+                // Scale the crop if it exceeds MAX_ANALYZE_PX.
+                val maxPx = MAX_ANALYZE_PX
+                val scale = if (cropW > maxPx || cropH > maxPx)
+                    minOf(maxPx.toFloat() / cropW, maxPx.toFloat() / cropH) else 1f
+                scaled = if (scale < 1f)
+                    Bitmap.createScaledBitmap(crop,
+                        (cropW * scale).toInt().coerceAtLeast(1),
+                        (cropH * scale).toInt().coerceAtLeast(1), true)
+                else crop
+
+                // Loc tokens for the tight bbox within the scaled crop (0–999 range).
+                val sw = scaled.width.toFloat(); val sh = scaled.height.toFloat()
+                val lx1 = ((bbox.left   - cropLeft) * scale / sw * 999).toInt().coerceIn(0, 999)
+                val ly1 = ((bbox.top    - cropTop ) * scale / sh * 999).toInt().coerceIn(0, 999)
+                val lx2 = ((bbox.right  - cropLeft) * scale / sw * 999).toInt().coerceIn(0, 999)
+                val ly2 = ((bbox.bottom - cropTop ) * scale / sh * 999).toInt().coerceIn(0, 999)
+                val regionPrompt = "<loc_$lx1><loc_$ly1><loc_$lx2><loc_$ly2>"
+                Log.d(TAG, "segmentRegion: crop=${cropW}×${cropH} scaled=${scaled.width}×${scaled.height} prompt=$regionPrompt")
+
+                val b64  = encodeFrame(scaled)
+                val json = runInferenceRaw("data:image/jpeg;base64,$b64",
+                    "<REGION_TO_SEGMENTATION>", regionPrompt)
+                if (json == null) {
+                    Log.w(TAG, "segmentRegion: timed out"); return@withContext emptyList()
+                }
+                Log.d(TAG, "segmentRegion raw json: ${json.take(400)}")
+
+                // Polygon coords from Florence are in scaled-crop pixel space.
+                // Translate back to original bitmap pixel space.
+                val raw = parseSegmentationResult(json, "<REGION_TO_SEGMENTATION>")
+                raw.map { (pts, label) ->
+                    FloatArray(pts.size) { j ->
+                        if (j % 2 == 0) pts[j] / scale + cropLeft
+                        else            pts[j] / scale + cropTop
+                    } to label
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "segmentRegion error: ${e.message}", e)
+                emptyList()
+            } finally {
+                if (scaled !== crop) scaled?.recycle()
+                crop?.recycle()
+                isProcessing.set(false)
+            }
+        }
+    }
+
+    /**
+     * Generate a detailed description for the region of [bitmap] defined by [bbox].
+     *
+     * Uses `<REGION_TO_DESCRIPTION>`. Returns null if not ready or inference fails.
+     */
+    suspend fun describeRegion(bitmap: Bitmap, bbox: RectF): String? {
+        if (!modelReady.get()) return null
+        if (!isProcessing.compareAndSet(false, true)) return null
+
+        return withContext(Dispatchers.Default) {
+            try {
+                val maxPx = MAX_ANALYZE_PX
+                val scale = if (bitmap.width > maxPx || bitmap.height > maxPx)
+                    minOf(maxPx.toFloat() / bitmap.width, maxPx.toFloat() / bitmap.height) else 1f
+                val scaled = if (scale < 1f)
+                    Bitmap.createScaledBitmap(bitmap,
+                        (bitmap.width * scale).toInt().coerceAtLeast(1),
+                        (bitmap.height * scale).toInt().coerceAtLeast(1), true)
+                else bitmap
+
+                val sw = scaled.width.toFloat(); val sh = scaled.height.toFloat()
+                val x1 = ((bbox.left  * scale / sw) * 999).toInt().coerceIn(0, 999)
+                val y1 = ((bbox.top   * scale / sh) * 999).toInt().coerceIn(0, 999)
+                val x2 = ((bbox.right * scale / sw) * 999).toInt().coerceIn(0, 999)
+                val y2 = ((bbox.bottom* scale / sh) * 999).toInt().coerceIn(0, 999)
+                val regionPrompt = "<loc_$x1><loc_$y1><loc_$x2><loc_$y2>"
+
+                val b64 = encodeFrame(scaled)
+                if (scale < 1f) scaled.recycle()
+
+                val json = runInferenceRaw("data:image/jpeg;base64,$b64",
+                    "<REGION_TO_DESCRIPTION>", regionPrompt)
+                if (json == null) { Log.w(TAG, "describeRegion: timed out"); return@withContext null }
+                parseStringResult(json, "<REGION_TO_DESCRIPTION>")
+            } catch (e: Exception) {
+                Log.e(TAG, "describeRegion error: ${e.message}", e)
+                null
+            } finally {
+                isProcessing.set(false)
+            }
+        }
+    }
+
+    /**
+     * Generate a short or detailed caption for the whole [bitmap].
+     *
+     * @param detailed  false → `<CAPTION>`, true → `<MORE_DETAILED_CAPTION>`
+     */
+    suspend fun captionImage(bitmap: Bitmap, detailed: Boolean = false): String? {
+        if (!modelReady.get()) return null
+        if (!isProcessing.compareAndSet(false, true)) return null
+
+        return withContext(Dispatchers.Default) {
+            try {
+                val task = if (detailed) "<MORE_DETAILED_CAPTION>" else "<CAPTION>"
+                val b64  = encodeFrame(bitmap)
+                val json = runInferenceRaw("data:image/jpeg;base64,$b64", task)
+                if (json == null) { Log.w(TAG, "captionImage: timed out"); return@withContext null }
+                parseStringResult(json, task)
+            } catch (e: Exception) {
+                Log.e(TAG, "captionImage error: ${e.message}", e)
+                null
             } finally {
                 isProcessing.set(false)
             }

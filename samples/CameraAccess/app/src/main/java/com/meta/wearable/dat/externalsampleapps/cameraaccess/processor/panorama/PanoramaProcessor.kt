@@ -5,10 +5,12 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RectF
 import android.util.Log
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessor
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessorResult
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.florence.FlorenceProcessor
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.sam.SamProcessor
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.vizlens.FeatureTracker
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
@@ -78,10 +80,10 @@ class PanoramaProcessor : OnDeviceProcessor() {
      * after both processors are created. If null, falls back to angle-labelled nodes.
      */
     private var florenceProcessor: FlorenceProcessor? = null
+    private var samProcessor:     SamProcessor?      = null
 
-    fun setFlorenceProcessor(fp: FlorenceProcessor) {
-        florenceProcessor = fp
-    }
+    fun setFlorenceProcessor(fp: FlorenceProcessor) { florenceProcessor = fp }
+    fun setSamProcessor(sp: SamProcessor)            { samProcessor     = sp }
 
     // ── Hierarchy-ready signal ────────────────────────────────────────────────
     // Emits true once Florence / fallback hierarchy completes after stitching.
@@ -219,9 +221,10 @@ class PanoramaProcessor : OnDeviceProcessor() {
                                     val fov = keyframeSnapshot.firstOrNull()?.bitmap?.let {
                                         cameraHFovDeg(it.width, it.height)
                                     } ?: 65f
-                                    hierarchyBuilder.buildFromFlorence(
+                                    val rawNodes = hierarchyBuilder.buildFromFlorence(
                                         regions, panoramaWidth, panorama.height, minAngle, maxAngle, fov
                                     ).also { Log.d(TAG, "Florence hierarchy: ${it.size} nodes") }
+                                    enrichWithSegmentation(panorama, regions, rawNodes)
                                 } else {
                                     Log.d(TAG, "Florence returned no regions — falling back to angle labels")
                                     hierarchyBuilder.build(keyframeSnapshot, panoramaWidth)
@@ -534,9 +537,10 @@ class PanoramaProcessor : OnDeviceProcessor() {
                 val regions = fp.analyzeRegionsTiled(copy)
                 nodes = if (regions.isNotEmpty()) {
                     val inferredMaxAngle = copy.width / PX_PER_DEG
-                    hierarchyBuilder.buildFromFlorence(
+                    val rawNodes = hierarchyBuilder.buildFromFlorence(
                         regions, copy.width, copy.height, 0f, inferredMaxAngle, 65f
                     ).also { Log.d(TAG, "loadAndAnalyzePanorama: ${it.size} nodes from Florence") }
+                    enrichWithSegmentation(copy, regions, rawNodes)
                 } else {
                     Log.d(TAG, "loadAndAnalyzePanorama: Florence returned no regions")
                     emptyList()
@@ -553,6 +557,52 @@ class PanoramaProcessor : OnDeviceProcessor() {
 
 
     // ── Private helpers ──────────────────────────────────────────────────────
+
+    /**
+     * Run MobileSAM segmentation on each detected region and return a new node list
+     * with [HierarchyNode.color] and [HierarchyNode.polygonXY] filled in.
+     *
+     * SAM encodes [panorama] once, then decodes a mask per bbox (~6ms each).
+     * If SAM is unavailable the original nodes are returned with only colors set.
+     */
+    private suspend fun enrichWithSegmentation(
+        panorama: Bitmap,
+        regions: List<Pair<RectF, String>>,
+        nodes: List<HierarchyNode>,
+    ): List<HierarchyNode> {
+        val sp = samProcessor
+        if (sp == null || !sp.isReady) {
+            Log.w(TAG, "enrichWithSegmentation: SAM not ready — using bbox fallback for all nodes")
+            return nodes.mapIndexed { i, node -> node.copy(color = NODE_COLORS[i % NODE_COLORS.size]) }
+        }
+        if (regions.size != nodes.size) {
+            Log.w(TAG, "enrichWithSegmentation: size mismatch regions=${regions.size} nodes=${nodes.size} — skipping")
+            return nodes
+        }
+
+        // Both lists are sorted by x-position (buildFromFlorence sorts by centerX).
+        val sortedRegions = regions.sortedBy { (bbox, _) -> bbox.centerX() }
+        val bboxes = sortedRegions.map { (bbox, _) -> bbox }
+
+        Log.d(TAG, "enrichWithSegmentation: encoding ${panorama.width}×${panorama.height} panorama…")
+        val polygons = sp.segmentRegions(panorama, bboxes)
+
+        return nodes.mapIndexed { i, node ->
+            val color = NODE_COLORS[i % NODE_COLORS.size]
+            val pts   = polygons.getOrNull(i)
+            if (pts == null || pts.size < 6) {
+                Log.d(TAG, "enrichWithSegmentation: node $i (${node.label}) — no polygon, bbox fallback")
+                node.copy(color = color)
+            } else {
+                val normalized = FloatArray(pts.size) { j ->
+                    if (j % 2 == 0) (pts[j] / panorama.width).coerceIn(0f, 1f)
+                    else            (pts[j] / panorama.height).coerceIn(0f, 1f)
+                }
+                Log.d(TAG, "enrichWithSegmentation: node $i (${node.label}) — ${pts.size / 2} SAM pts")
+                node.copy(color = color, polygonXY = normalized)
+            }
+        }
+    }
 
     /**
      * Create and store a keyframe for [frame] at [angleDeg].

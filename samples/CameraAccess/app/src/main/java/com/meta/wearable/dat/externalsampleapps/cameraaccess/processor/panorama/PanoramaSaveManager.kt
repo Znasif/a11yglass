@@ -3,6 +3,10 @@ package com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
@@ -27,6 +31,7 @@ data class SavedPanorama(
     val nodeCount: Int,
     val filePath: String,
     val thumbnailBitmap: Bitmap? = null,
+    val hasGlassio: Boolean = false,
 )
 
 
@@ -118,6 +123,7 @@ class PanoramaSaveManager(context: Context) {
                 nodeCount       = n,
                 filePath        = file.absolutePath,
                 thumbnailBitmap = thumb,
+                hasGlassio      = File(dir, "${file.nameWithoutExtension}.glassio").exists(),
             )
         }.sortedByDescending { it.timestamp }
     }
@@ -159,16 +165,28 @@ class PanoramaSaveManager(context: Context) {
     // ── Glassio sidecar ───────────────────────────────────────────────────────
 
     /**
-     * Write a `.glassio` ZIP sidecar alongside the panorama JPEG for [id].
+     * Write a `.glassio` v2 ZIP sidecar alongside the panorama JPEG for [id].
      *
-     * Format (rename to .zip to inspect in any archive manager):
-     *   meta.json  — { version, panoramaWidth, frameWidth, frameHeight, keyframes:[{file,angleDeg}] }
-     *   kf_000.jpg — full-resolution keyframe JPEG (90% quality)
-     *   kf_001.jpg …
+     * Contents (rename to .zip to inspect):
+     *   meta.json    — v2: keyframes + metadata block + hotspots[]
+     *   colorMap.png — panorama-sized ARGB bitmap; each hotspot region painted its solid color
+     *   kf_000.jpg … — full-resolution keyframe JPEGs
+     *
+     * [nodes] may be empty (e.g. Florence still running); in that case only
+     * keyframes and an empty hotspots array are written.
      *
      * Blocking — call on a background thread.
      */
-    fun saveGlassio(id: String, keyframes: List<Keyframe>, panoramaWidth: Int) {
+    fun saveGlassio(
+        id: String,
+        keyframes: List<Keyframe>,
+        panoramaWidth: Int,
+        nodes: List<HierarchyNode> = emptyList(),
+        panoramaHeight: Int = 0,
+        shortDescription: String = "",
+        longDescription: String = "",
+        title: String = "",
+    ) {
         if (keyframes.isEmpty()) return
         val jpeg = findJpegFileForId(id) ?: run {
             Log.w(TAG, "saveGlassio: no JPEG found for id=$id")
@@ -178,11 +196,20 @@ class PanoramaSaveManager(context: Context) {
         try {
             ZipOutputStream(FileOutputStream(file)).use { zip ->
                 val first = keyframes.first().bitmap
-                val meta  = JSONObject().apply {
-                    put("version",      1)
+
+                // ── meta.json ──────────────────────────────────────────────
+                val meta = JSONObject().apply {
+                    put("version",       2)
                     put("panoramaWidth", panoramaWidth)
-                    put("frameWidth",   first.width)
-                    put("frameHeight",  first.height)
+                    put("panoramaHeight",panoramaHeight)
+                    put("frameWidth",    first.width)
+                    put("frameHeight",   first.height)
+                    put("metadata", JSONObject().apply {
+                        put("title",            title)
+                        put("shortDescription", shortDescription)
+                        put("longDescription",  longDescription)
+                        put("lang",             "en-US")
+                    })
                     put("keyframes", JSONArray().also { arr ->
                         keyframes.forEachIndexed { i, kf ->
                             arr.put(JSONObject().apply {
@@ -191,18 +218,52 @@ class PanoramaSaveManager(context: Context) {
                             })
                         }
                     })
+                    put("hotspots", JSONArray().also { arr ->
+                        nodes.forEach { node ->
+                            arr.put(JSONObject().apply {
+                                put("color", JSONArray().apply {
+                                    put(Color.red(node.color))
+                                    put(Color.green(node.color))
+                                    put(Color.blue(node.color))
+                                    put(1)
+                                })
+                                put("title",                  node.label)
+                                put("description",            node.description)
+                                put("panoramaXFraction",      node.panoramaXFraction.toDouble())
+                                put("panoramaYFraction",      node.panoramaYFraction.toDouble())
+                                put("panoramaWidthFraction",  node.panoramaWidthFraction.toDouble())
+                                put("panoramaHeightFraction", node.panoramaHeightFraction.toDouble())
+                                node.polygonXY?.let { pts ->
+                                    put("polygon", JSONArray().also { pa ->
+                                        pts.forEach { pa.put(it.toDouble()) }
+                                    })
+                                }
+                            })
+                        }
+                    })
                 }
                 zip.putNextEntry(ZipEntry("meta.json"))
                 zip.write(meta.toString(2).toByteArray(Charsets.UTF_8))
                 zip.closeEntry()
 
+                // ── colorMap.png ───────────────────────────────────────────
+                if (nodes.isNotEmpty() && panoramaWidth > 0 && panoramaHeight > 0) {
+                    val colorMap = buildColorMap(nodes, panoramaWidth, panoramaHeight)
+                    zip.putNextEntry(ZipEntry("colorMap.png"))
+                    colorMap.compress(Bitmap.CompressFormat.PNG, 100, zip)
+                    zip.closeEntry()
+                    colorMap.recycle()
+                }
+
+                // ── keyframe JPEGs ─────────────────────────────────────────
                 keyframes.forEachIndexed { i, kf ->
                     zip.putNextEntry(ZipEntry("kf_${"%03d".format(i)}.jpg"))
                     kf.bitmap.compress(Bitmap.CompressFormat.JPEG, 90, zip)
                     zip.closeEntry()
                 }
             }
-            Log.d(TAG, "Saved glassio ${file.name}: ${keyframes.size} keyframes, ${file.length() / 1024} KB")
+            Log.d(TAG, "Saved glassio v2 ${file.name}: ${keyframes.size} kf, " +
+                "${nodes.size} hotspots, ${file.length() / 1024} KB")
         } catch (e: Exception) {
             Log.e(TAG, "saveGlassio failed for $id: ${e.message}")
             file.delete()
@@ -210,56 +271,103 @@ class PanoramaSaveManager(context: Context) {
     }
 
     /**
-     * Load the `.glassio` sidecar for [id], or return null if it does not exist.
+     * Paint each node's segmentation polygon (or bbox fallback) onto a
+     * [panoramaWidth]×[panoramaHeight] bitmap using its solid [HierarchyNode.color].
+     * Background is transparent. Used as colorMap.png for touch hit-testing.
+     */
+    private fun buildColorMap(
+        nodes: List<HierarchyNode>,
+        panoramaWidth: Int,
+        panoramaHeight: Int,
+    ): Bitmap {
+        val bmp    = Bitmap.createBitmap(panoramaWidth, panoramaHeight, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        val paint  = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        val w      = panoramaWidth.toFloat()
+        val h      = panoramaHeight.toFloat()
+
+        nodes.forEach { node ->
+            paint.color = node.color or (0xFF shl 24).toInt()  // force full opacity
+            val pts = node.polygonXY
+            if (pts != null && pts.size >= 6) {
+                val path = Path()
+                path.moveTo(pts[0] * w, pts[1] * h)
+                for (i in 2 until pts.size - 1 step 2) path.lineTo(pts[i] * w, pts[i + 1] * h)
+                path.close()
+                canvas.drawPath(path, paint)
+            } else {
+                // Bbox fallback
+                val cx = node.panoramaXFraction * w
+                val cy = node.panoramaYFraction * h
+                val hw = node.panoramaWidthFraction  * w / 2f
+                val hh = node.panoramaHeightFraction * h / 2f
+                canvas.drawRect(cx - hw, cy - hh, cx + hw, cy + hh, paint)
+            }
+        }
+        return bmp
+    }
+
+    /**
+     * Load the `.glassio` sidecar for [id]. Supports both v1 and v2.
      *
-     * Returned bitmaps are freshly decoded and owned by the caller (pass to
-     * [PanoramaProcessor.loadAndAnalyzePanorama] which recycles on the next reset).
+     * Returns a [GlassioData] containing keyframes and (v2 only) hierarchy nodes.
+     * Returns null if the sidecar does not exist or cannot be parsed.
      *
+     * Returned bitmaps are freshly decoded and owned by the caller.
      * Blocking — call on a background thread.
      */
-    fun loadGlassio(id: String): List<Keyframe>? {
+    data class GlassioData(
+        val keyframes: List<Keyframe>,
+        val nodes: List<HierarchyNode> = emptyList(),
+        val shortDescription: String = "",
+        val longDescription: String = "",
+        val title: String = "",
+    )
+
+    fun loadGlassio(id: String): GlassioData? {
         val glassio = findGlassioFileForId(id) ?: return null
         return try {
-            val bitmaps = mutableMapOf<String, Bitmap>()
-            var kfArray: org.json.JSONArray? = null
+            val bitmaps    = mutableMapOf<String, Bitmap>()
+            var metaObj: JSONObject? = null
 
             ZipInputStream(glassio.inputStream()).use { zip ->
                 var entry = zip.nextEntry
                 while (entry != null) {
                     when {
                         entry.name == "meta.json" ->
-                            kfArray = JSONObject(zip.readBytes().toString(Charsets.UTF_8))
-                                .getJSONArray("keyframes")
+                            metaObj = JSONObject(zip.readBytes().toString(Charsets.UTF_8))
                         entry.name.endsWith(".jpg") -> {
                             val bytes = zip.readBytes()
                             BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                                 ?.let { bitmaps[entry!!.name] = it }
                         }
+                        // colorMap.png is not loaded at startup — only needed for hit-testing
                     }
                     zip.closeEntry()
                     entry = zip.nextEntry
                 }
             }
 
-            val arr = kfArray ?: run {
+            val meta = metaObj ?: run {
                 Log.w(TAG, "loadGlassio $id: missing meta.json")
                 bitmaps.values.forEach { it.recycle() }
                 return null
             }
 
-            val keyframes = (0 until arr.length()).mapNotNull { i ->
-                val obj    = arr.getJSONObject(i)
+            val version   = meta.optInt("version", 1)
+            val kfArray   = meta.getJSONArray("keyframes")
+            val keyframes = (0 until kfArray.length()).mapNotNull { i ->
+                val obj    = kfArray.getJSONObject(i)
                 val bitmap = bitmaps[obj.getString("file")] ?: return@mapNotNull null
                 Keyframe(
                     bitmap           = bitmap,
-                    thumbnail        = bitmap,   // same ref; state.reset() checks isRecycled
+                    thumbnail        = bitmap,
                     angleDeg         = obj.getDouble("angleDeg").toFloat(),
                     verticalOffsetPx = 0f,
                     homography       = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f),
                 )
             }
 
-            // Recycle any bitmaps not mapped to a valid keyframe entry.
             val used = keyframes.mapTo(mutableSetOf()) { it.bitmap }
             bitmaps.values.filter { it !in used }.forEach { it.recycle() }
 
@@ -268,8 +376,50 @@ class PanoramaSaveManager(context: Context) {
                 return null
             }
 
-            Log.d(TAG, "Loaded glassio $id: ${keyframes.size} keyframes")
-            keyframes
+            // ── v2: load metadata and hotspots ─────────────────────────────
+            var nodes            = emptyList<HierarchyNode>()
+            var shortDescription = ""
+            var longDescription  = ""
+            var title            = ""
+
+            if (version >= 2) {
+                val metadataObj = meta.optJSONObject("metadata")
+                shortDescription = metadataObj?.optString("shortDescription") ?: ""
+                longDescription  = metadataObj?.optString("longDescription")  ?: ""
+                title            = metadataObj?.optString("title")            ?: ""
+
+                val hotspotsArr = meta.optJSONArray("hotspots")
+                if (hotspotsArr != null) {
+                    nodes = (0 until hotspotsArr.length()).mapNotNull { i ->
+                        val h   = hotspotsArr.getJSONObject(i)
+                        val col = h.optJSONArray("color")
+                        val color = if (col != null && col.length() >= 3)
+                            Color.rgb(col.getInt(0), col.getInt(1), col.getInt(2))
+                        else Color.TRANSPARENT
+
+                        val polyArr = h.optJSONArray("polygon")
+                        val polygon = if (polyArr != null && polyArr.length() >= 6) {
+                            FloatArray(polyArr.length()) { j -> polyArr.getDouble(j).toFloat() }
+                        } else null
+
+                        HierarchyNode(
+                            label                 = h.optString("title"),
+                            angleDeg              = (h.optDouble("panoramaXFraction", 0.5) * 360).toFloat(),
+                            panoramaXFraction     = h.optDouble("panoramaXFraction", 0.5).toFloat(),
+                            panoramaYFraction     = h.optDouble("panoramaYFraction", 0.5).toFloat(),
+                            panoramaWidthFraction = h.optDouble("panoramaWidthFraction", 0.1).toFloat(),
+                            panoramaHeightFraction= h.optDouble("panoramaHeightFraction", 1.0).toFloat(),
+                            keyframeIndex         = -1,
+                            description           = h.optString("description"),
+                            color                 = color,
+                            polygonXY             = polygon,
+                        )
+                    }
+                }
+            }
+
+            Log.d(TAG, "Loaded glassio v$version $id: ${keyframes.size} kf, ${nodes.size} hotspots")
+            GlassioData(keyframes, nodes, shortDescription, longDescription, title)
         } catch (e: Exception) {
             Log.e(TAG, "loadGlassio failed for $id: ${e.message}")
             null

@@ -249,7 +249,10 @@ class PanoramaLocalizer {
         val strip = strips[idx]
         val mode  = if (lastBestIdx >= 0) "LOCKED" else "SCAN[$scanIdx/${strips.size}]"
 
-        featureTracker.setReferenceFrame(strip.bitmap, emptyList())  // strip.bitmap is already downsampled
+        if (idx != lastSetIdx) {
+            featureTracker.setReferenceFrame(strip.bitmap, emptyList())  // strip.bitmap is already downsampled
+            lastSetIdx = idx
+        }
         val scaledLive = downsample(liveFrame)
         val scaledW    = scaledLive.width
         val scaledH    = scaledLive.height
@@ -285,6 +288,7 @@ class PanoramaLocalizer {
         if (lastBestIdx >= 0) {
             scanIdx     = (lastBestIdx - SEARCH_RADIUS).coerceAtLeast(0)
             lastBestIdx = -1
+            lastSetIdx  = -1
             Log.d(TAG, "Strip lock lost on idx=$idx — rescanning from $scanIdx")
         } else {
             scanIdx = (scanIdx + 1) % strips.size

@@ -37,6 +37,10 @@ class FeatureTracker(context: Context) {
         private const val MIN_MATCHES_FOR_HOMOGRAPHY = 4
         private const val RANSAC_THRESHOLD = 5.0f
         private const val RANSAC_ITERATIONS = 100
+        // Minimum absolute inlier count required for a valid homography.
+        // Prevents false positives when numPoints is small (e.g. 9 points → 33% = 3 inliers,
+        // which can occur for wildly wrong shifts that happen to share 3 chance inliers).
+        private const val MIN_RANSAC_INLIERS = 8
         private const val LOG_EVERY_N_FRAMES = 50
     }
 
@@ -341,7 +345,7 @@ class FeatureTracker(context: Context) {
             for (i in 0 until numKeypoints) {
                 val matchedIdx = matchBuf.get().toInt()
                 val score      = scoreBuf?.get() ?: 1.0f
-                if (matchedIdx < 0 || score < 0.2f) continue
+                if (matchedIdx < 0 || score < 0.5f) continue
                 if (count >= maxMatches) break
 
                 val offset = count * 4
@@ -417,7 +421,7 @@ class FeatureTracker(context: Context) {
             }
         }
 
-        return if (bestInlierCount >= numPoints / 2) bestHomography else null
+        return if (bestInlierCount >= numPoints / 3 && bestInlierCount >= MIN_RANSAC_INLIERS) bestHomography else null
     }
 
     /**
