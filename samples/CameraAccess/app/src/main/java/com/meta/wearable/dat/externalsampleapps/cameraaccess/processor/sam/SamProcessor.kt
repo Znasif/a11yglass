@@ -74,12 +74,12 @@ class SamProcessor {
     fun initialize(context: Context) {
         try {
             ortEnv = OrtEnvironment.getEnvironment()
-            val options = buildSessionOptions()
-            val env = ortEnv!!
-            encoderSession = env.createSession(
-                ensureModel(context, ENCODER_ASSET).absolutePath, options)
-            decoderSession = env.createSession(
-                ensureModel(context, DECODER_ASSET).absolutePath, options)
+            val env          = ortEnv!!
+            val options      = buildSessionOptions()
+            val encoderPath  = ensureModel(context, ENCODER_ASSET).absolutePath
+            val decoderPath  = ensureModel(context, DECODER_ASSET).absolutePath
+            encoderSession   = env.createSession(encoderPath, options)
+            decoderSession   = env.createSession(decoderPath, options)
             Log.i(TAG, "SamProcessor initialized — encoder OK, decoder OK")
         } catch (e: Exception) {
             Log.e(TAG, "SamProcessor init failed: ${e.message}", e)
@@ -199,16 +199,10 @@ class SamProcessor {
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
             setIntraOpNumThreads(4)
             try {
-                addNnapi()
-                Log.i(TAG, "NNAPI delegate enabled")
+                addXnnpack(mapOf("intra_op_num_threads" to "4"))
+                Log.i(TAG, "XNNPACK execution provider enabled")
             } catch (e: Exception) {
-                Log.w(TAG, "NNAPI unavailable, trying XNNPACK: ${e.message}")
-                try {
-                    addXnnpack(mapOf("intra_op_num_threads" to "4"))
-                    Log.i(TAG, "XNNPACK delegate enabled")
-                } catch (e2: Exception) {
-                    Log.w(TAG, "XNNPACK unavailable, using default CPU: ${e2.message}")
-                }
+                Log.w(TAG, "XNNPACK not available, using generic CPU: ${e.message}")
             }
         }
 
