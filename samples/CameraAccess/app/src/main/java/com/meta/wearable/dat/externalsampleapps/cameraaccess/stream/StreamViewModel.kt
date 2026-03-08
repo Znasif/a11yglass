@@ -281,7 +281,7 @@ class StreamViewModel(
                 Log.d(TAG, "PanoramaProcessor: resetting stale stitch before restart")
                 hierarchyReadyJob?.cancel(); hierarchyReadyJob = null
                 localizationJob?.cancel();   localizationJob   = null
-                pp.startPanorama()   // clears stitchedResult on next process() tick
+                pp.resetToIdle()   // clears stitchedResult without starting capture
                 _uiState.update { it.copy(
                     processedFrame    = null,
                     carouselPanorama  = null,

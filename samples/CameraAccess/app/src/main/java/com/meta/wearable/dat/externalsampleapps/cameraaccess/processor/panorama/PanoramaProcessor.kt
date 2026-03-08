@@ -430,6 +430,19 @@ class PanoramaProcessor : OnDeviceProcessor() {
 
     // ── Public session control ───────────────────────────────────────────────
 
+    /**
+     * Reset to IDLE state, clearing any stitched result, without starting a new capture.
+     * Used when "Start" is pressed after a completed panorama — the strip/degree view is
+     * restored and the user can begin a fresh sweep with the camera button.
+     */
+    fun resetToIdle() {
+        startRequested = false
+        stopRequested  = false
+        state.reset()                   // clears stitchedResult, hierarchyNodes, etc.
+        _hierarchyReady.value = false
+        Log.d(TAG, "resetToIdle: processor cleared to IDLE")
+    }
+
     /** Start a new panorama sweep (UI thread safe). */
     fun startPanorama() {
         stopRequested  = false
