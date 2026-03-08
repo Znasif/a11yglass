@@ -663,7 +663,7 @@ class PanoramaProcessor : OnDeviceProcessor() {
             else ->
                 "Tap camera button to start panorama"
         }
-        canvas.drawText(statusText, 20f, 60f, statusPaint)
+        //canvas.drawText(statusText, 20f, 60f, statusPaint)
 
         stripRenderer.draw(
             canvas,
