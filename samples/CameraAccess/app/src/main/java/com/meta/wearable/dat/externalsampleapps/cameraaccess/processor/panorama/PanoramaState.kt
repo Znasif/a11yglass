@@ -140,6 +140,12 @@ class PanoramaState {
     var skippedCount: Int = 0
     var stitchedResult: Bitmap? = null     // Set when Phase 2 completes
 
+    // ── Simplified capture storage ──────────────────────────────────────────
+    // Raw frames stored during Phase 1 (pixel-diff gated). Converted to
+    // Keyframes post-hoc when the user stops the sweep.
+    val rawFrames: MutableList<Bitmap> = mutableListOf()
+    var lastCapturedSmall: Bitmap? = null  // 64×64 thumbnail for pixel-diff comparison
+
     // Phase 3 state
     @Volatile var hierarchyNodes: List<HierarchyNode> = emptyList()
     var localizedAngleDeg: Float = 0f
@@ -159,6 +165,10 @@ class PanoramaState {
         keyframes.clear()
         lastAcceptedFrame?.let { if (!it.isRecycled) it.recycle() }
         lastAcceptedFrame = null
+        rawFrames.forEach { if (!it.isRecycled) it.recycle() }
+        rawFrames.clear()
+        lastCapturedSmall?.let { if (!it.isRecycled) it.recycle() }
+        lastCapturedSmall = null
         skippedCount = 0
         panoramaAngularSpanDeg = 65f
         // Do NOT recycle stitchedResult here — StreamUiState.processedFrame may still

@@ -56,6 +56,16 @@ class PanoramaProcessor : OnDeviceProcessor() {
         const val PROCESSOR_ID = -108
         private val IDENTITY_H = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)
 
+        // ── Capture mode toggle ────────────────────────────────────────────
+        // true  = offline: pixel-diff capture, pass-through display, async post-hoc homography
+        // false = online:  per-frame homography, live strip preview, synchronous stitching
+        const val OFFLINE_CAPTURE = true
+
+        // ── Pixel-diff capture gating (offline mode only) ─────────────────
+        private const val DIFF_THUMB_SIZE         = 64
+        private const val PIXEL_DIFF_THRESHOLD    = 10    // mean abs diff per channel (0-255)
+        private const val MIN_CAPTURE_INTERVAL_MS = 200L  // hard cap: ≤5 captures/sec
+
         // ── Guidance constants ────────────────────────────────────────────────
         private const val MILESTONE_DEG   = 5f    // announce at 20°, 40°, 60° …
         private const val SLOW_THRESHOLD  = 3      // consecutive non-advancing frames → nudge
@@ -107,6 +117,12 @@ class PanoramaProcessor : OnDeviceProcessor() {
     private var lastSpokenMilestoneDeg = 0f
     private var consecutiveStillFrames = 0
     private var lastGuidanceMs         = 0L
+    private var lastCaptureTimeMs      = 0L
+
+    // ── Post-hoc processing progress (async, read by process() during STITCHING) ─
+    @Volatile private var postHocComplete    = false
+    @Volatile private var postHocAngleDeg    = 0f
+    private var lastReportedPostHocMilestone  = 0
 
     // ── Reality Proxy tracking ────────────────────────────────────────────────
     // Only announce when the focused node changes, to avoid per-frame TTS spam.
@@ -167,83 +183,161 @@ class PanoramaProcessor : OnDeviceProcessor() {
                     lastSpokenMilestoneDeg = 0f
                     consecutiveStillFrames = 0
                     lastGuidanceMs = 0L
+                    lastCaptureTimeMs = System.currentTimeMillis()
                     lastAnnouncedNodeLabel = null
-                    featureTracker?.setReferenceFrame(frame, emptyList())
-                    state.lastAcceptedFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
-                    captureKeyframe(frame, 0f, 0f, IDENTITY_H.copyOf())
-                    Log.d(TAG, "Panorama session started — first tile at 0°")
 
-                    return@withContext OnDeviceProcessorResult(
-                        processedImage = renderFrame(frame),
-                        text = "Panorama session started",
-                        processingTimeMs = System.currentTimeMillis() - t0
-                    )
+                    if (OFFLINE_CAPTURE) {
+                        // Offline: store first raw frame + pixel-diff reference
+                        state.rawFrames.add(frame.copy(Bitmap.Config.ARGB_8888, false))
+                        state.lastCapturedSmall = Bitmap.createScaledBitmap(
+                            frame, DIFF_THUMB_SIZE, DIFF_THUMB_SIZE, true
+                        )
+                        Log.d(TAG, "Panorama session started (offline) — first frame stored")
+                        return@withContext OnDeviceProcessorResult(
+                            processedImage = frame,
+                            text = "Panorama session started",
+                            processingTimeMs = System.currentTimeMillis() - t0
+                        )
+                    } else {
+                        // Online: set up FeatureTracker + first keyframe
+                        val ft = featureTracker!!
+                        ft.setReferenceFrame(frame, emptyList())
+                        state.lastAcceptedFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
+                        captureKeyframe(frame, 0f, 0f, IDENTITY_H.copyOf())
+                        Log.d(TAG, "Panorama session started (online) — first keyframe captured")
+                        return@withContext OnDeviceProcessorResult(
+                            processedImage = renderFrame(frame),
+                            text = "Panorama session started",
+                            processingTimeMs = System.currentTimeMillis() - t0
+                        )
+                    }
                 }
 
                 // ── ② Handle stop request ────────────────────────────────────
                 if (stopRequested) {
                     stopRequested = false
-                    state.phase = PanoramaPhase.STITCHING
 
-                    if (state.keyframes.size >= 2) {
-                        Log.d(TAG, "Phase 2: stitching ${state.keyframes.size} keyframes…")
-                        state.stitchedResult = stitcher.stitch(state.keyframes)
-                        // Compute angular span from the stitched pixel width and frame FOV.
-                        val hFov = state.keyframes.firstOrNull()?.bitmap
-                            ?.let { cameraHFovDeg(it.width, it.height) } ?: 65f
-                        val frameW = state.keyframes.firstOrNull()?.bitmap?.width ?: 720
-                        state.panoramaAngularSpanDeg =
-                            ((state.stitchedResult!!.width.toFloat() * hFov / frameW)
-                                .coerceIn(10f, 350f))
-                    } else {
-                        Log.d(TAG, "Not enough keyframes to stitch (${state.keyframes.size})")
-                    }
+                    if (OFFLINE_CAPTURE) {
+                        // ── Offline: async post-hoc homography + stitch ─────
+                        val rawCount = state.rawFrames.size
+                        if (rawCount >= 2) {
+                            state.phase = PanoramaPhase.STITCHING
+                            postHocComplete = false
+                            postHocAngleDeg = 0f
+                            lastReportedPostHocMilestone = 0
 
-                    state.phase = PanoramaPhase.IDLE
+                            processorScope.launch {
+                                Log.d(TAG, "Phase 2 (offline): processing $rawCount raw frames post-hoc…")
+                                processFramesPostHoc()
 
-                    // Launch scene analysis in processorScope (outlives localProcessingJob).
-                    // Reality Proxy is gated on this completing (enterRealityProxy checks
-                    // state.hierarchyNodes.isNotEmpty()).
-                    val panorama         = state.stitchedResult
-                    val panoramaWidth    = panorama?.width
-                    val keyframeSnapshot = state.keyframes.toList()
-                    if (panoramaWidth != null) {
-                        val fp = florenceProcessor
-                        processorScope.launch {
-                            val nodes: List<HierarchyNode>
-                            if (fp != null) {
-                                Log.d(TAG, "Launching Florence scene analysis on ${panorama.width}×${panorama.height} panorama…")
-                                val regions = fp.analyzeRegionsTiled(panorama)
-
-                nodes = if (regions.isNotEmpty()) {
-                                    val minAngle = keyframeSnapshot.minOf { it.angleDeg }
-                                    val maxAngle = keyframeSnapshot.maxOf { it.angleDeg }
-                                    val fov = keyframeSnapshot.firstOrNull()?.bitmap?.let {
-                                        cameraHFovDeg(it.width, it.height)
-                                    } ?: 65f
-                                    val rawNodes = hierarchyBuilder.buildFromFlorence(
-                                        regions, panoramaWidth, panorama.height, minAngle, maxAngle, fov
-                                    ).also { Log.d(TAG, "Florence hierarchy: ${it.size} nodes") }
-                                    enrichWithSegmentation(panorama, regions, rawNodes)
-                                } else {
-                                    Log.d(TAG, "Florence returned no regions — falling back to angle labels")
-                                    hierarchyBuilder.build(keyframeSnapshot, panoramaWidth)
+                                Log.d(TAG, "Phase 2 (offline): stitching ${state.keyframes.size} keyframes…")
+                                state.stitchedResult = stitcher.stitch(state.keyframes)
+                                if (state.stitchedResult != null) {
+                                    val hFov = state.keyframes.firstOrNull()?.bitmap
+                                        ?.let { cameraHFovDeg(it.width, it.height) } ?: 65f
+                                    val frameW = state.keyframes.firstOrNull()?.bitmap?.width ?: 720
+                                    state.panoramaAngularSpanDeg =
+                                        ((state.stitchedResult!!.width.toFloat() * hFov / frameW)
+                                            .coerceIn(10f, 350f))
                                 }
-                            } else {
-                                nodes = hierarchyBuilder.build(keyframeSnapshot, panoramaWidth)
+                                postHocComplete = true
+                                Log.d(TAG, "Phase 2 (offline) async complete: ${state.keyframes.size} keyframes, " +
+                                    "stitch=${if (state.stitchedResult != null) "${state.stitchedResult!!.width}×${state.stitchedResult!!.height}" else "null"}")
                             }
-                            hierarchyBuilder.setNodes(nodes)
-                            state.hierarchyNodes = nodes
-                            _hierarchyReady.value = true
-                            Log.d(TAG, "Hierarchy ready: ${nodes.size} nodes — signalling ViewModel")
+
+                            return@withContext OnDeviceProcessorResult(
+                                processedImage = frame,
+                                text = "Processing $rawCount frames",
+                                processingTimeMs = System.currentTimeMillis() - t0
+                            )
+                        } else {
+                            Log.d(TAG, "Not enough raw frames to stitch ($rawCount)")
+                            state.rawFrames.forEach { if (!it.isRecycled) it.recycle() }
+                            state.rawFrames.clear()
+                            state.phase = PanoramaPhase.IDLE
+                            return@withContext OnDeviceProcessorResult(
+                                processedImage = frame,
+                                text = "Not enough frames",
+                                processingTimeMs = System.currentTimeMillis() - t0
+                            )
+                        }
+                    } else {
+                        // ── Online: synchronous stitch (keyframes already built) ──
+                        val kfCount = state.keyframes.size
+                        if (kfCount >= 2) {
+                            state.phase = PanoramaPhase.STITCHING
+                            Log.d(TAG, "Phase 2 (online): stitching $kfCount keyframes synchronously…")
+                            state.stitchedResult = stitcher.stitch(state.keyframes)
+                            if (state.stitchedResult != null) {
+                                val hFov = state.keyframes.firstOrNull()?.bitmap
+                                    ?.let { cameraHFovDeg(it.width, it.height) } ?: 65f
+                                val frameW = state.keyframes.firstOrNull()?.bitmap?.width ?: 720
+                                state.panoramaAngularSpanDeg =
+                                    ((state.stitchedResult!!.width.toFloat() * hFov / frameW)
+                                        .coerceIn(10f, 350f))
+                            }
+                            state.phase = PanoramaPhase.IDLE
+
+                            // Launch Florence analysis asynchronously
+                            val panorama      = state.stitchedResult
+                            val panoramaWidth = panorama?.width
+                            val keyframeSnapshot = state.keyframes.toList()
+                            if (panoramaWidth != null) {
+                                launchHierarchyAnalysis(panorama, panoramaWidth, keyframeSnapshot)
+                            }
+
+                            val msg = "Panorama complete, $kfCount frames stitched"
+                            Log.d(TAG, msg)
+                            return@withContext OnDeviceProcessorResult(
+                                processedImage = state.stitchedResult ?: frame,
+                                text = msg,
+                                processingTimeMs = System.currentTimeMillis() - t0
+                            )
+                        } else {
+                            Log.d(TAG, "Not enough keyframes to stitch ($kfCount)")
+                            state.phase = PanoramaPhase.IDLE
+                            return@withContext OnDeviceProcessorResult(
+                                processedImage = frame,
+                                text = "Not enough frames",
+                                processingTimeMs = System.currentTimeMillis() - t0
+                            )
                         }
                     }
+                }
 
-                    val msg = "Panorama complete, ${state.keyframes.size} frames stitched"
-                    Log.d(TAG, msg)
+                // ── ②b Ongoing async stitching (offline mode only) ───────────
+                if (state.phase == PanoramaPhase.STITCHING && OFFLINE_CAPTURE) {
+                    if (postHocComplete) {
+                        postHocComplete = false
+                        state.phase = PanoramaPhase.IDLE
+
+                        val panorama      = state.stitchedResult
+                        val panoramaWidth = panorama?.width
+                        val keyframeSnapshot = state.keyframes.toList()
+                        if (panoramaWidth != null) {
+                            launchHierarchyAnalysis(panorama, panoramaWidth, keyframeSnapshot)
+                        }
+
+                        val msg = "Panorama complete, ${state.keyframes.size} frames stitched"
+                        Log.d(TAG, msg)
+                        return@withContext OnDeviceProcessorResult(
+                            processedImage = state.stitchedResult ?: frame,
+                            text = msg,
+                            processingTimeMs = System.currentTimeMillis() - t0
+                        )
+                    }
+
+                    // Still processing — report 20° milestones
+                    val angle = kotlin.math.abs(postHocAngleDeg)
+                    val milestone = (angle / 20f).toInt() * 20
+                    val progress = if (milestone >= 20 && milestone > lastReportedPostHocMilestone) {
+                        lastReportedPostHocMilestone = milestone
+                        "$milestone degrees aligned"
+                    } else null
+
                     return@withContext OnDeviceProcessorResult(
-                        processedImage = state.stitchedResult ?: renderFrame(frame),
-                        text = msg,
+                        processedImage = frame,
+                        text = progress,
                         processingTimeMs = System.currentTimeMillis() - t0
                     )
                 }
@@ -345,70 +439,29 @@ class PanoramaProcessor : OnDeviceProcessor() {
                     )
                 }
 
-                // ── Normal Phase 1 capture loop ───────────────────────────────
-                var guidanceText: String? = null
-
+                // ── Phase 1 capture loop ─────────────────────────────────────
                 if (state.isCapturing) {
-                    val now      = System.currentTimeMillis()
-                    val canSpeak = now - lastGuidanceMs > MIN_GUIDANCE_MS
-                    val H        = featureTracker?.computeHomography(frame)
-
-                    if (H == null) {
-                        state.skippedCount++
-                        consecutiveStillFrames++
-                        Log.d(TAG, "Bad frame (null H) — skipping [total skipped=${state.skippedCount}]")
-                        if (canSpeak && consecutiveStillFrames >= SLOW_THRESHOLD) {
-                            consecutiveStillFrames = 0
-                            lastGuidanceMs = now
-                            guidanceText = "Keep moving"
+                    if (OFFLINE_CAPTURE) {
+                        // Offline: pixel-diff gated raw frame storage, pass-through display
+                        if (shouldCapture(frame)) {
+                            state.rawFrames.add(frame.copy(Bitmap.Config.ARGB_8888, false))
+                            Log.v(TAG, "Raw frame captured: ${state.rawFrames.size} total")
                         }
+                        return@withContext OnDeviceProcessorResult(
+                            processedImage = frame,
+                            text = null,
+                            processingTimeMs = System.currentTimeMillis() - t0
+                        )
                     } else {
-                        val shiftPx  = extractHorizontalShift(H, frame.width, frame.height)
-                        val shiftDeg = shiftPx / frame.width * cameraHFovDeg(frame.width, frame.height)
-
-                        when {
-                            abs(shiftDeg) < MIN_CAPTURE_DEGREES -> {
-                                state.skippedCount++
-                                consecutiveStillFrames++
-                                Log.v(TAG, "Too close (${"%.1f".format(shiftDeg)}°) — skip")
-                                if (canSpeak && consecutiveStillFrames >= SLOW_THRESHOLD) {
-                                    consecutiveStillFrames = 0
-                                    lastGuidanceMs = now
-                                    guidanceText = "Keep moving"
-                                }
-                            }
-
-                            abs(shiftDeg) > MAX_CAPTURE_DEGREES -> {
-                                consecutiveStillFrames = 0
-                                Log.d(TAG, "Too fast (${"%.1f".format(shiftDeg)}°) — discarded, resetting reference")
-                                featureTracker?.setReferenceFrame(frame, emptyList())
-                                state.lastAcceptedFrame?.let { if (!it.isRecycled) it.recycle() }
-                                state.lastAcceptedFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
-                            }
-
-                            else -> {
-                                consecutiveStillFrames = 0
-                                state.currentAngleDeg += shiftDeg
-                                state.currentVerticalPx += extractVerticalShift(H, frame.width, frame.height)
-                                captureKeyframe(frame, state.currentAngleDeg, state.currentVerticalPx, H)
-                                featureTracker?.setReferenceFrame(frame, emptyList())
-                                state.lastAcceptedFrame?.let { if (!it.isRecycled) it.recycle() }
-                                state.lastAcceptedFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
-                                val milestone = (state.currentAngleDeg / MILESTONE_DEG).toInt() * MILESTONE_DEG
-                                if (canSpeak && milestone >= MILESTONE_DEG && milestone > lastSpokenMilestoneDeg) {
-                                    lastSpokenMilestoneDeg = milestone
-                                    lastGuidanceMs = now
-                                    guidanceText = "${milestone.toInt()} degrees"
-                                }
-                            }
-                        }
+                        // Online: per-frame homography, degree gating, strip preview
+                        return@withContext processOnlineCapture(frame, t0)
                     }
                 }
 
-                // ── Render strip overlay (Phase 1 live preview) ───────────────
+                // ── Fallback: idle without stitch, show raw frame ────────────
                 OnDeviceProcessorResult(
-                    processedImage = renderFrame(frame),
-                    text = guidanceText,
+                    processedImage = frame,
+                    text = null,
                     processingTimeMs = System.currentTimeMillis() - t0
                 )
 
@@ -628,6 +681,274 @@ class PanoramaProcessor : OnDeviceProcessor() {
                 node.copy(color = color, polygonXY = normalized)
             }
         }
+    }
+
+    /**
+     * Launch Florence scene analysis in processorScope. Shared by online stop
+     * handler and offline ②b completion handler.
+     */
+    private fun launchHierarchyAnalysis(
+        panorama: Bitmap,
+        panoramaWidth: Int,
+        keyframeSnapshot: List<Keyframe>,
+    ) {
+        val fp = florenceProcessor
+        processorScope.launch {
+            val nodes: List<HierarchyNode>
+            if (fp != null) {
+                Log.d(TAG, "Launching Florence scene analysis on ${panorama.width}×${panorama.height} panorama…")
+                val regions = fp.analyzeRegionsTiled(panorama)
+
+                nodes = if (regions.isNotEmpty()) {
+                    val minAngle = keyframeSnapshot.minOf { it.angleDeg }
+                    val maxAngle = keyframeSnapshot.maxOf { it.angleDeg }
+                    val fov = keyframeSnapshot.firstOrNull()?.bitmap?.let {
+                        cameraHFovDeg(it.width, it.height)
+                    } ?: 65f
+                    val rawNodes = hierarchyBuilder.buildFromFlorence(
+                        regions, panoramaWidth, panorama.height, minAngle, maxAngle, fov
+                    ).also { Log.d(TAG, "Florence hierarchy: ${it.size} nodes") }
+                    enrichWithSegmentation(panorama, regions, rawNodes)
+                } else {
+                    Log.d(TAG, "Florence returned no regions — falling back to angle labels")
+                    hierarchyBuilder.build(keyframeSnapshot, panoramaWidth)
+                }
+            } else {
+                nodes = hierarchyBuilder.build(keyframeSnapshot, panoramaWidth)
+            }
+            hierarchyBuilder.setNodes(nodes)
+            state.hierarchyNodes = nodes
+            _hierarchyReady.value = true
+            Log.d(TAG, "Hierarchy ready: ${nodes.size} nodes — signalling ViewModel")
+        }
+    }
+
+    /**
+     * Online capture loop: per-frame homography via FeatureTracker, degree-based
+     * gating, strip preview overlay. Used when OFFLINE_CAPTURE = false.
+     */
+    private fun processOnlineCapture(frame: Bitmap, t0: Long): OnDeviceProcessorResult {
+        val ft = featureTracker!!
+        val H = ft.computeHomography(frame)
+
+        if (H == null) {
+            consecutiveStillFrames++
+            val now = System.currentTimeMillis()
+            val guidance = if (consecutiveStillFrames >= SLOW_THRESHOLD
+                && now - lastGuidanceMs > MIN_GUIDANCE_MS
+            ) {
+                lastGuidanceMs = now
+                consecutiveStillFrames = 0
+                "Pan slowly to the right"
+            } else null
+            return OnDeviceProcessorResult(
+                processedImage = renderFrame(frame),
+                text = guidance,
+                processingTimeMs = System.currentTimeMillis() - t0
+            )
+        }
+        consecutiveStillFrames = 0
+
+        val shiftPx  = extractHorizontalShift(H, frame.width, frame.height)
+        val shiftDeg = shiftPx / frame.width * cameraHFovDeg(frame.width, frame.height)
+        val vertPx   = extractVerticalShift(H, frame.width, frame.height)
+
+        val absDeg = abs(shiftDeg)
+        when {
+            absDeg > MAX_CAPTURE_DEGREES -> {
+                // Too fast — reset reference, discard
+                ft.setReferenceFrame(frame, emptyList())
+                state.lastAcceptedFrame?.recycle()
+                state.lastAcceptedFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
+                Log.d(TAG, "Too fast: ${"%.1f".format(shiftDeg)}° — reference reset")
+                val now = System.currentTimeMillis()
+                val guidance = if (now - lastGuidanceMs > MIN_GUIDANCE_MS) {
+                    lastGuidanceMs = now
+                    "Too fast, slow down"
+                } else null
+                return OnDeviceProcessorResult(
+                    processedImage = renderFrame(frame),
+                    text = guidance,
+                    processingTimeMs = System.currentTimeMillis() - t0
+                )
+            }
+            absDeg < MIN_CAPTURE_DEGREES -> {
+                // Too close — skip
+                state.skippedCount++
+                return OnDeviceProcessorResult(
+                    processedImage = renderFrame(frame),
+                    text = null,
+                    processingTimeMs = System.currentTimeMillis() - t0
+                )
+            }
+            else -> {
+                // Accepted keyframe
+                state.currentAngleDeg += shiftDeg
+                state.currentVerticalPx += vertPx
+                captureKeyframe(frame, state.currentAngleDeg, state.currentVerticalPx, H)
+                state.skippedCount = 0
+
+                ft.setReferenceFrame(frame, emptyList())
+                state.lastAcceptedFrame?.recycle()
+                state.lastAcceptedFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
+
+                // Milestone TTS
+                val absAngle = abs(state.currentAngleDeg)
+                val milestoneDeg = (absAngle / MILESTONE_DEG).toInt() * MILESTONE_DEG
+                val now = System.currentTimeMillis()
+                val announcement = if (milestoneDeg > lastSpokenMilestoneDeg
+                    && now - lastGuidanceMs > MIN_GUIDANCE_MS
+                ) {
+                    lastSpokenMilestoneDeg = milestoneDeg
+                    lastGuidanceMs = now
+                    "${"%.0f".format(milestoneDeg)} degrees"
+                } else null
+
+                return OnDeviceProcessorResult(
+                    processedImage = renderFrame(frame),
+                    text = announcement,
+                    processingTimeMs = System.currentTimeMillis() - t0
+                )
+            }
+        }
+    }
+
+    /**
+     * Lightweight motion gate: returns true if the frame differs enough from
+     * the last captured frame AND enough time has elapsed.
+     *
+     * Downscales to 64×64 and computes mean absolute per-channel pixel difference.
+     * ~1ms total — negligible compared to the old per-frame homography (~50-100ms).
+     */
+    private fun shouldCapture(frame: Bitmap): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - lastCaptureTimeMs < MIN_CAPTURE_INTERVAL_MS) return false
+
+        val small = Bitmap.createScaledBitmap(frame, DIFF_THUMB_SIZE, DIFF_THUMB_SIZE, true)
+        val prev = state.lastCapturedSmall
+        if (prev == null) {
+            state.lastCapturedSmall = small
+            lastCaptureTimeMs = now
+            return true
+        }
+
+        val n = DIFF_THUMB_SIZE * DIFF_THUMB_SIZE
+        val pixels1 = IntArray(n)
+        val pixels2 = IntArray(n)
+        prev.getPixels(pixels1, 0, DIFF_THUMB_SIZE, 0, 0, DIFF_THUMB_SIZE, DIFF_THUMB_SIZE)
+        small.getPixels(pixels2, 0, DIFF_THUMB_SIZE, 0, 0, DIFF_THUMB_SIZE, DIFF_THUMB_SIZE)
+
+        var totalDiff = 0L
+        for (i in 0 until n) {
+            val p1 = pixels1[i]; val p2 = pixels2[i]
+            totalDiff += abs((p1 shr 16 and 0xFF) - (p2 shr 16 and 0xFF))  // R
+            totalDiff += abs((p1 shr 8 and 0xFF) - (p2 shr 8 and 0xFF))    // G
+            totalDiff += abs((p1 and 0xFF) - (p2 and 0xFF))                  // B
+        }
+        val meanDiff = totalDiff.toFloat() / (n * 3)
+
+        if (meanDiff >= PIXEL_DIFF_THRESHOLD) {
+            prev.recycle()
+            state.lastCapturedSmall = small
+            lastCaptureTimeMs = now
+            return true
+        } else {
+            small.recycle()
+            return false
+        }
+    }
+
+    /**
+     * Post-hoc processing: compute homographies between consecutive raw frames,
+     * derive cumulative angles, and build proper Keyframes for the stitcher.
+     *
+     * Transfers ownership of accepted raw bitmaps into Keyframes (no extra copy).
+     * Rejected raw frames are recycled.
+     */
+    private fun processFramesPostHoc() {
+        val raw = state.rawFrames
+        if (raw.size < 2) {
+            if (raw.size == 1) {
+                addRawAsKeyframe(raw[0], 0f, 0f, IDENTITY_H.copyOf())
+            }
+            raw.clear()
+            return
+        }
+
+        val ft = featureTracker ?: run {
+            Log.e(TAG, "processFramesPostHoc: no FeatureTracker — aborting")
+            raw.forEach { if (!it.isRecycled) it.recycle() }
+            raw.clear()
+            return
+        }
+
+        val rawCount = raw.size
+        val accepted = mutableSetOf<Int>()
+        var cumulAngle = 0f
+        var cumulVertical = 0f
+        var consecutiveFailures = 0
+
+        // First frame is always accepted at angle 0
+        accepted.add(0)
+        addRawAsKeyframe(raw[0], 0f, 0f, IDENTITY_H.copyOf())
+        ft.setReferenceFrame(raw[0], emptyList())
+
+        for (i in 1 until rawCount) {
+            val H = ft.computeHomography(raw[i])
+            if (H == null) {
+                consecutiveFailures++
+                Log.d(TAG, "Post-hoc: frame $i/$rawCount — null H (consecutive=$consecutiveFailures)")
+                // If too many consecutive failures, reference is too stale — reset
+                if (consecutiveFailures >= 3) {
+                    ft.setReferenceFrame(raw[i], emptyList())
+                    consecutiveFailures = 0
+                    Log.d(TAG, "Post-hoc: reference reset to frame $i after $consecutiveFailures failures")
+                }
+                continue
+            }
+            consecutiveFailures = 0
+
+            val shiftPx = extractHorizontalShift(H, raw[i].width, raw[i].height)
+            val shiftDeg = shiftPx / raw[i].width * cameraHFovDeg(raw[i].width, raw[i].height)
+            val vertPx = extractVerticalShift(H, raw[i].width, raw[i].height)
+
+            if (abs(shiftDeg) > MAX_CAPTURE_DEGREES) {
+                Log.d(TAG, "Post-hoc: frame $i/$rawCount — too fast (${"%.1f".format(shiftDeg)}°), resetting reference")
+                ft.setReferenceFrame(raw[i], emptyList())
+                continue
+            }
+
+            cumulAngle += shiftDeg
+            cumulVertical += vertPx
+            postHocAngleDeg = cumulAngle  // volatile write — read by process() for progress
+            accepted.add(i)
+            addRawAsKeyframe(raw[i], cumulAngle, cumulVertical, H)
+            ft.setReferenceFrame(raw[i], emptyList())
+            Log.d(TAG, "Post-hoc: frame $i/$rawCount accepted — shift=${"%.1f".format(shiftDeg)}° cumul=${"%.1f".format(cumulAngle)}°")
+        }
+
+        // Recycle raw frames NOT accepted as keyframes (accepted ones are now owned by Keyframe)
+        for (i in 0 until rawCount) {
+            if (i !in accepted && !raw[i].isRecycled) raw[i].recycle()
+        }
+        raw.clear()
+        state.lastCapturedSmall?.let { if (!it.isRecycled) it.recycle() }
+        state.lastCapturedSmall = null
+        state.keyframes.sortBy { it.angleDeg }
+
+        Log.d(TAG, "Post-hoc complete: ${state.keyframes.size} keyframes from $rawCount raw frames, " +
+            "span=${"%.1f".format(cumulAngle)}°")
+    }
+
+    /**
+     * Add a raw frame bitmap as a Keyframe WITHOUT copying it (transfers ownership).
+     * Only creates a thumbnail; the full bitmap is reused directly.
+     */
+    private fun addRawAsKeyframe(bitmap: Bitmap, angleDeg: Float, verticalOffsetPx: Float, H: FloatArray) {
+        val thumbH = (bitmap.height * STRIP_HEIGHT_FRACTION).toInt().coerceAtLeast(1)
+        val thumbW = (bitmap.width.toFloat() / bitmap.height * thumbH).toInt().coerceAtLeast(1)
+        val thumbnail = Bitmap.createScaledBitmap(bitmap, thumbW, thumbH, true)
+        state.keyframes.add(Keyframe(bitmap, thumbnail, angleDeg, verticalOffsetPx, H))
     }
 
     /**
