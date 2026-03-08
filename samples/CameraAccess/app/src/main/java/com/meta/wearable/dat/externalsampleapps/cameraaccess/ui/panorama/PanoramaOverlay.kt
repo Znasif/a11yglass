@@ -67,6 +67,7 @@ fun BoxScope.PanoramaOverlay(
     streamUiState: StreamUiState,
     onStepNode: (Int) -> Unit,
     onCapturePhoto: () -> Unit,
+    onSelectNode: (Int) -> Unit = {},
 ) {
     val panorama = streamUiState.carouselPanorama ?: return
 
@@ -180,7 +181,10 @@ fun BoxScope.PanoramaOverlay(
                             contentDescription = node.label
                             role = Role.Button
                         }
-                        .clickable { manualXFraction = node.panoramaXFraction },
+                        .clickable {
+                            manualXFraction = node.panoramaXFraction
+                            onSelectNode(idx)
+                        },
                 )
             } else {
                 // ── Bbox fallback (rounded rect) ────────────────────────────
@@ -204,7 +208,10 @@ fun BoxScope.PanoramaOverlay(
                             contentDescription = node.label
                             role = Role.Button
                         }
-                        .clickable { manualXFraction = node.panoramaXFraction },
+                        .clickable {
+                            manualXFraction = node.panoramaXFraction
+                            onSelectNode(idx)
+                        },
                 )
             }
         }

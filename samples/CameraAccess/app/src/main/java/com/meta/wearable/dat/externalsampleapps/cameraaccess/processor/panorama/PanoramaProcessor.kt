@@ -515,7 +515,11 @@ class PanoramaProcessor : OnDeviceProcessor() {
      *                        Bitmaps are adopted into [state.keyframes] and recycled on
      *                        the next [PanoramaState.reset].
      */
-    fun loadAndAnalyzePanorama(bitmap: Bitmap, glassioKeyframes: List<Keyframe> = emptyList()) {
+    fun loadAndAnalyzePanorama(
+        bitmap: Bitmap,
+        glassioKeyframes: List<Keyframe> = emptyList(),
+        precomputedNodes: List<HierarchyNode> = emptyList(),
+    ) {
         val copy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
         state.stitchedResult  = copy
         state.hierarchyNodes  = emptyList()
@@ -541,6 +545,15 @@ class PanoramaProcessor : OnDeviceProcessor() {
         }
         Log.d(TAG, "loadAndAnalyzePanorama: ${glassioKeyframes.size} glassio keyframes, " +
             "span=${"%.1f".format(state.panoramaAngularSpanDeg)}°")
+
+        // If nodes were already computed (e.g. loaded from .glassio), skip Florence entirely.
+        if (precomputedNodes.isNotEmpty()) {
+            Log.d(TAG, "loadAndAnalyzePanorama: using ${precomputedNodes.size} precomputed nodes (skipping Florence)")
+            hierarchyBuilder.setNodes(precomputedNodes)
+            state.hierarchyNodes  = precomputedNodes
+            _hierarchyReady.value = true
+            return
+        }
 
         val fp = florenceProcessor
         processorScope.launch {

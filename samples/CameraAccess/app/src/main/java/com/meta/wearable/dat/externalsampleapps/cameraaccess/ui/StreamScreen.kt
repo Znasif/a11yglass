@@ -87,6 +87,7 @@ fun StreamScreen(
         onToggleMute = { streamViewModel.toggleMute() },
         onCycleTimerMode = { streamViewModel.cycleTimerMode() },
         onCapturePhoto = { streamViewModel.capturePhoto() },
+        onSelectNode   = { streamViewModel.selectNode(it) },
         onSharePhoto = { streamViewModel.sharePhoto(it) },
         onHideShareDialog = { streamViewModel.hideShareDialog() },
         onShowPanoramaPicker = { streamViewModel.showPanoramaPicker() },
@@ -109,6 +110,7 @@ fun StreamScreenContent(
     onToggleMute: () -> Unit,
     onCycleTimerMode: () -> Unit,
     onCapturePhoto: () -> Unit,
+    onSelectNode: (Int) -> Unit = {},
     onSharePhoto: (Bitmap) -> Unit,
     onHideShareDialog: () -> Unit,
     onShowPanoramaPicker: () -> Unit,
@@ -133,6 +135,7 @@ fun StreamScreenContent(
                 streamUiState = streamUiState,
                 onStepNode = onStepNode,
                 onCapturePhoto = onCapturePhoto,
+                onSelectNode = onSelectNode,
             )
         } else {
             // Live camera feed or in-progress processor overlay.

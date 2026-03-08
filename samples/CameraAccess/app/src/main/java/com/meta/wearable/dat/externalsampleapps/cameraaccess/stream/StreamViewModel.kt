@@ -525,7 +525,11 @@ class StreamViewModel(
             // Hand the raw stitch (and keyframes if available) to the processor.
             // With keyframes, Reality Proxy uses keyframe mode (much more reliable).
             // Without them, it falls back to strip mode using the stitched panorama.
-            pp.loadAndAnalyzePanorama(bitmap, glassio?.keyframes ?: emptyList())
+            pp.loadAndAnalyzePanorama(
+                bitmap,
+                glassioKeyframes   = glassio?.keyframes ?: emptyList(),
+                precomputedNodes   = glassio?.nodes     ?: emptyList(),
+            )
 
             _uiState.update { it.copy(
                 carouselPanorama       = bitmap,
@@ -558,6 +562,18 @@ class StreamViewModel(
      * Announces the node label and its approximate o'clock position
      * derived from its horizontal fraction in the panorama.
      */
+    /** Select a node by index (e.g. from a direct button tap in the panorama overlay). */
+    fun selectNode(index: Int) {
+        val nodes = _uiState.value.hierarchyNodes
+        if (index !in nodes.indices) return
+        _uiState.update { it.copy(currentNodeIndex = index) }
+        val node   = nodes[index]
+        val oClock = angleToOClock(
+            angleFromCenterDeg = (node.panoramaXFraction - 0.5f) * _uiState.value.carouselAngularSpanDeg
+        )
+        announceText("${node.label}, $oClock o'clock")
+    }
+
     fun stepNode(delta: Int) {
         val nodes = _uiState.value.hierarchyNodes
         if (nodes.isEmpty()) return
