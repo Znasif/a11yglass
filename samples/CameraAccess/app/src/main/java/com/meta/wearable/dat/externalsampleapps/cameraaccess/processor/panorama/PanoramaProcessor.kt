@@ -57,7 +57,7 @@ class PanoramaProcessor : OnDeviceProcessor() {
         private val IDENTITY_H = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)
 
         // ── Guidance constants ────────────────────────────────────────────────
-        private const val MILESTONE_DEG   = 20f    // announce at 20°, 40°, 60° …
+        private const val MILESTONE_DEG   = 5f    // announce at 20°, 40°, 60° …
         private const val SLOW_THRESHOLD  = 3      // consecutive non-advancing frames → nudge
         private const val MIN_GUIDANCE_MS = 8_000L // minimum gap between any two TTS lines
     }

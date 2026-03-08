@@ -267,6 +267,32 @@ class StreamViewModel(
 
         val selectedProcessorId = wearablesViewModel.uiState.value.selectedProcessorId
 
+        // For PanoramaProcessor: if there is a previous stitch result and the user
+        // explicitly starts streaming again, treat this as "start fresh" — clear the
+        // panorama and return to CAMERA mode so the live degree strip is shown instead
+        // of the old panorama. The auto-start on processor-selection skips this (it
+        // always arrives with captureButtonMode = CAMERA, so the guard is harmless).
+        if (OnDeviceProcessorManager.isOnDeviceProcessor(selectedProcessorId)) {
+            val pp = OnDeviceProcessorManager.getProcessor(selectedProcessorId)
+            if (pp is com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
+                && pp.hasStitchedResult
+                && _uiState.value.captureButtonMode != CaptureButtonMode.CAMERA
+            ) {
+                Log.d(TAG, "PanoramaProcessor: resetting stale stitch before restart")
+                hierarchyReadyJob?.cancel(); hierarchyReadyJob = null
+                localizationJob?.cancel();   localizationJob   = null
+                pp.startPanorama()   // clears stitchedResult on next process() tick
+                _uiState.update { it.copy(
+                    processedFrame    = null,
+                    carouselPanorama  = null,
+                    hierarchyNodes    = emptyList(),
+                    currentNodeIndex  = -1,
+                    captureButtonMode = CaptureButtonMode.CAMERA,
+                    statusMessage     = "",
+                ) }
+            }
+        }
+
         if (OnDeviceProcessorManager.isOnDeviceProcessor(selectedProcessorId)) {
             startLocalProcessing(selectedProcessorId)
         } else {
@@ -888,8 +914,6 @@ class StreamViewModel(
                     resumeVideoCapture()   // restart camera feed (was paused after stitch)
                     if (!_uiState.value.isStreamingToServer) startServerStreaming()
                     processor.enterRealityProxy()
-                    // Collect xFraction from the processor and push into uiState so the
-                    // UI pans the panorama image to the localizer's position each frame.
                     localizationJob?.cancel()
                     localizationJob = viewModelScope.launch {
                         processor.localizedXFraction.collect { fraction ->
