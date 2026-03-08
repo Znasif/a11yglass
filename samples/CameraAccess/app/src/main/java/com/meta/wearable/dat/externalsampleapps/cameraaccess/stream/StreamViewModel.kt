@@ -302,6 +302,7 @@ class StreamViewModel(
      * Start processing frames locally using an on-device processor.
      */
     private fun startLocalProcessing(processorId: Int) {
+        resumeVideoCapture()   // ensure frames flow even if video was paused (e.g. after stitching)
         val processor = OnDeviceProcessorManager.getProcessor(processorId)
         if (processor == null) {
             _uiState.update { it.copy(errorMessage = "On-device processor not found") }
@@ -459,8 +460,12 @@ class StreamViewModel(
             }
 
             // Hierarchy is ready — activate the Explore button and load panorama into carousel.
+            // Guard: only promote if still in PANORAMA_ANALYZING. If the user reset (Start
+            // Processing / exit RP) while Florence was running, the mode is already CAMERA
+            // and we must not overwrite it with PANORAMA_DONE or restore carouselPanorama.
             val n = pp.hierarchyNodeCount
             _uiState.update { state ->
+                if (state.captureButtonMode != CaptureButtonMode.PANORAMA_ANALYZING) return@update state
                 state.copy(
                     captureButtonMode      = CaptureButtonMode.PANORAMA_DONE,
                     carouselPanorama       = pp.stitchedResult,
@@ -910,23 +915,39 @@ class StreamViewModel(
                 }
 
                 processor.phase == com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaPhase.REALITY_PROXY -> {
-                    // ── Exit Reality Proxy ───────────────────────────────────
-                    Log.d(TAG, "Panorama: exiting Reality Proxy")
-                    localizationJob?.cancel()
-                    localizationJob = null
+                    // ── Exit Reality Proxy — return to live camera for a new sweep ─
+                    Log.d(TAG, "Panorama: exiting Reality Proxy — resetting for new sweep")
+                    localizationJob?.cancel();    localizationJob    = null
+                    hierarchyReadyJob?.cancel();  hierarchyReadyJob  = null
+                    // Cancel localProcessingJob BEFORE exitRealityProxy() so no in-flight
+                    // process() call can see phase=IDLE+stitchedResult and return the stitch
+                    // as processedImage, which would race with the processedFrame=null reset.
+                    localProcessingJob?.cancel(); localProcessingJob = null
                     processor.exitRealityProxy()
-                    finishPanoramaCapture()   // cancels localProcessingJob, preserves carousel
-                    // Hierarchy was already built before entering RP — restore DONE state directly.
+                    processor.resetToIdle()
                     _uiState.update { it.copy(
-                        captureButtonMode = CaptureButtonMode.PANORAMA_DONE,
-                        statusMessage = "Panorama ready — tap camera to enter proxy mode",
+                        isStreamingToServer = false,
+                        processedFrame      = null,
+                        captureButtonMode   = CaptureButtonMode.CAMERA,
+                        carouselPanorama    = null,
+                        hierarchyNodes      = emptyList(),
+                        currentNodeIndex    = -1,
+                        statusMessage       = "",
                     ) }
+                    resumeVideoCapture()
+                    startServerStreaming()
                 }
 
                 processor.hasStitchedResult -> {
                     // ── Enter Reality Proxy ──────────────────────────────────
                     Log.d(TAG, "Panorama: entering Reality Proxy")
                     resumeVideoCapture()   // restart camera feed (was paused after stitch)
+                    // Set PROXY_ACTIVE BEFORE startServerStreaming() so its stale-stitch
+                    // reset guard (captureButtonMode != PROXY_ACTIVE) skips the reset.
+                    _uiState.update { it.copy(
+                        statusMessage = "Reality Proxy — look at objects",
+                        captureButtonMode = CaptureButtonMode.PROXY_ACTIVE,
+                    ) }
                     if (!_uiState.value.isStreamingToServer) startServerStreaming()
                     processor.enterRealityProxy()
                     localizationJob?.cancel()
@@ -935,10 +956,6 @@ class StreamViewModel(
                             _uiState.update { it.copy(carouselXFraction = fraction) }
                         }
                     }
-                    _uiState.update { it.copy(
-                        statusMessage = "Reality Proxy — look at objects",
-                        captureButtonMode = CaptureButtonMode.PROXY_ACTIVE,
-                    ) }
                 }
 
                 else -> {
