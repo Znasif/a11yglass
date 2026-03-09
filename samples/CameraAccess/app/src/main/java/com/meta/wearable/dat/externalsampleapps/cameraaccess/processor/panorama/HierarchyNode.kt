@@ -29,6 +29,7 @@ data class HierarchyNode(
     /** Normalised vertical span (0–1) of the bbox. Defaults to 1.0 (full height). */
     val panoramaHeightFraction: Float = 1.0f,
     val description: String = "",
+    val longDescription: String = "",
     val color: Int = android.graphics.Color.TRANSPARENT,
     /**
      * Segmentation polygon in normalised panorama fractions [0,1].

@@ -15,6 +15,7 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.vizlens.F
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -59,7 +60,7 @@ class PanoramaProcessor : OnDeviceProcessor() {
         // ── Capture mode toggle ────────────────────────────────────────────
         // true  = offline: pixel-diff capture, pass-through display, async post-hoc homography
         // false = online:  per-frame homography, live strip preview, synchronous stitching
-        const val OFFLINE_CAPTURE = true
+        const val OFFLINE_CAPTURE = false
 
         // ── Pixel-diff capture gating (offline mode only) ─────────────────
         private const val DIFF_THUMB_SIZE         = 64
@@ -100,6 +101,13 @@ class PanoramaProcessor : OnDeviceProcessor() {
     // StreamViewModel collects this to activate the Explore button.
     private val _hierarchyReady = MutableStateFlow(false)
     val hierarchyReady: StateFlow<Boolean> = _hierarchyReady.asStateFlow()
+
+    // ── Progressive node enrichment ───────────────────────────────────────────
+    // Emits the full node list each time a node's longDescription is filled in
+    // by the background captioning loop. StreamViewModel collects this to
+    // re-save the .glassio file after each enriched node.
+    private val _hierarchyNodesFlow = MutableStateFlow<List<HierarchyNode>>(emptyList())
+    val hierarchyNodesFlow: StateFlow<List<HierarchyNode>> = _hierarchyNodesFlow.asStateFlow()
 
     // ── Localised angle (Reality Proxy) ──────────────────────────────────────
     // Absolute x-fraction (0..1) across the panorama, updated each frame in
@@ -492,7 +500,8 @@ class PanoramaProcessor : OnDeviceProcessor() {
         startRequested = false
         stopRequested  = false
         state.reset()                   // clears stitchedResult, hierarchyNodes, etc.
-        _hierarchyReady.value = false
+        _hierarchyReady.value    = false
+        _hierarchyNodesFlow.value = emptyList()
         Log.d(TAG, "resetToIdle: processor cleared to IDLE")
     }
 
@@ -603,17 +612,19 @@ class PanoramaProcessor : OnDeviceProcessor() {
         if (precomputedNodes.isNotEmpty()) {
             Log.d(TAG, "loadAndAnalyzePanorama: using ${precomputedNodes.size} precomputed nodes (skipping Florence)")
             hierarchyBuilder.setNodes(precomputedNodes)
-            state.hierarchyNodes  = precomputedNodes
-            _hierarchyReady.value = true
+            state.hierarchyNodes   = precomputedNodes
+            _hierarchyNodesFlow.value = precomputedNodes
+            _hierarchyReady.value  = true
             return
         }
 
         val fp = florenceProcessor
         processorScope.launch {
+            var regions = emptyList<Pair<RectF, String>>()
             val nodes: List<HierarchyNode>
             if (fp != null) {
                 Log.d(TAG, "loadAndAnalyzePanorama: launching Florence on ${copy.width}×${copy.height}")
-                val regions = fp.analyzeRegionsTiled(copy)
+                regions = fp.analyzeRegionsTiled(copy)
                 nodes = if (regions.isNotEmpty()) {
                     val inferredMaxAngle = copy.width / PX_PER_DEG
                     val rawNodes = hierarchyBuilder.buildFromFlorence(
@@ -629,11 +640,66 @@ class PanoramaProcessor : OnDeviceProcessor() {
                 nodes = emptyList()
             }
             hierarchyBuilder.setNodes(nodes)
-            state.hierarchyNodes  = nodes
-            _hierarchyReady.value = true
+            state.hierarchyNodes   = nodes
+            _hierarchyNodesFlow.value = nodes
+            _hierarchyReady.value  = true
+
+            launchDescriptionEnrichment(copy, nodes, regions)
         }
     }
 
+
+    // ── Description enrichment ───────────────────────────────────────────────
+
+    /**
+     * For each node, crop its bbox from [panorama] and run
+     * `<MORE_DETAILED_CAPTION>` via Florence. Updates [state.hierarchyNodes]
+     * and [_hierarchyNodesFlow] after each node so the ViewModel can re-save
+     * the .glassio file incrementally.
+     *
+     * Pauses automatically while [PanoramaPhase.REALITY_PROXY] is active to
+     * avoid starving the live localization frame loop.
+     *
+     * [regions] must be in the same order as [nodes] (both sorted by centerX
+     * as produced by [PanoramaHierarchyBuilder.buildFromFlorence]).
+     */
+    private fun launchDescriptionEnrichment(
+        panorama: Bitmap,
+        nodes: List<HierarchyNode>,
+        regions: List<Pair<RectF, String>>,
+    ) {
+        val fp = florenceProcessor ?: return
+        if (nodes.isEmpty() || regions.isEmpty()) return
+        val sortedBboxes = regions.sortedBy { (bbox, _) -> bbox.centerX() }.map { it.first }
+
+        processorScope.launch {
+            val enriched = nodes.toMutableList()
+            for (i in nodes.indices) {
+                // Suspend while Reality Proxy is live — Florence inference would
+                // hold isProcessing for ~6s and drop all localization frames.
+                while (state.phase == PanoramaPhase.REALITY_PROXY) { delay(500) }
+
+                val bbox  = sortedBboxes.getOrNull(i) ?: continue
+                val cropL = bbox.left.toInt().coerceIn(0, panorama.width - 1)
+                val cropT = bbox.top.toInt().coerceIn(0, panorama.height - 1)
+                val cropW = bbox.width().toInt().coerceIn(1, panorama.width - cropL)
+                val cropH = bbox.height().toInt().coerceIn(1, panorama.height - cropT)
+                val crop  = Bitmap.createBitmap(panorama, cropL, cropT, cropW, cropH)
+                val desc  = fp.captionImage(crop, detailed = true)
+                crop.recycle()
+
+                if (desc != null) {
+                    enriched[i] = enriched[i].copy(longDescription = desc)
+                    val snapshot = enriched.toList()
+                    state.hierarchyNodes  = snapshot
+                    _hierarchyNodesFlow.value = snapshot
+                    Log.d(TAG, "enriched node $i '${nodes[i].label}': ${desc.take(80)}")
+                }
+            }
+            Log.d(TAG, "description enrichment complete: " +
+                "${enriched.count { it.longDescription.isNotEmpty() }}/${nodes.size} nodes enriched")
+        }
+    }
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
@@ -694,10 +760,11 @@ class PanoramaProcessor : OnDeviceProcessor() {
     ) {
         val fp = florenceProcessor
         processorScope.launch {
+            var regions = emptyList<Pair<RectF, String>>()
             val nodes: List<HierarchyNode>
             if (fp != null) {
                 Log.d(TAG, "Launching Florence scene analysis on ${panorama.width}×${panorama.height} panorama…")
-                val regions = fp.analyzeRegionsTiled(panorama)
+                regions = fp.analyzeRegionsTiled(panorama)
 
                 nodes = if (regions.isNotEmpty()) {
                     val minAngle = keyframeSnapshot.minOf { it.angleDeg }
@@ -717,9 +784,12 @@ class PanoramaProcessor : OnDeviceProcessor() {
                 nodes = hierarchyBuilder.build(keyframeSnapshot, panoramaWidth)
             }
             hierarchyBuilder.setNodes(nodes)
-            state.hierarchyNodes = nodes
+            state.hierarchyNodes  = nodes
+            _hierarchyNodesFlow.value = nodes
             _hierarchyReady.value = true
             Log.d(TAG, "Hierarchy ready: ${nodes.size} nodes — signalling ViewModel")
+
+            launchDescriptionEnrichment(panorama, nodes, regions)
         }
     }
 

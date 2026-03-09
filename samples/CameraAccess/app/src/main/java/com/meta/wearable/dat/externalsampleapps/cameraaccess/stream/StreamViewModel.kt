@@ -64,8 +64,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.annotation.OptIn
 
 class StreamViewModel(
@@ -478,25 +480,54 @@ class StreamViewModel(
             // Auto-save the raw stitch so it can be re-analyzed on load.
             // Skip when this watcher was started for a reload (file already on disk).
             if (autoSave) {
-                val rawStitch   = pp.stitchedResult
-                val kfSnapshot  = pp.keyframes   // snapshot before any reset
+                val rawStitch  = pp.stitchedResult
+                val kfSnapshot = pp.keyframes   // snapshot before any reset
                 if (rawStitch != null) {
-                    viewModelScope.launch(Dispatchers.IO) {
-                        val saved    = panoramaSaveManager.save(rawStitch, n)
-                        val nodes    = pp.hierarchyNodes
+                    // Initial save — blocks until disk write completes so we have savedId
+                    // before starting the enrichment re-save loop.
+                    val savedId = withContext(Dispatchers.IO) {
+                        val saved = panoramaSaveManager.save(rawStitch, n)
                         panoramaSaveManager.saveGlassio(
                             id               = saved.id,
                             keyframes        = kfSnapshot,
                             panoramaWidth    = rawStitch.width,
-                            nodes            = nodes,
+                            nodes            = pp.hierarchyNodes,
                             panoramaHeight   = rawStitch.height,
-                            shortDescription = nodes.firstOrNull()?.description ?: "",
+                            shortDescription = "",
                             longDescription  = "",
                             title            = "",
                         )
                         refreshSavedPanoramas()
-                        Log.d(TAG, "Auto-saved panorama id=${saved.id}, ${kfSnapshot.size} kf, ${nodes.size} nodes")
+                        Log.d(TAG, "Auto-saved panorama id=${saved.id}, ${kfSnapshot.size} kf, ${n} nodes")
+                        saved.id
                     }
+
+                    // Re-save after each node gets its longDescription filled in.
+                    // Filter skips the current StateFlow value (no descriptions yet)
+                    // and only triggers when at least one node has been enriched.
+                    pp.hierarchyNodesFlow
+                        .filter { nodes -> nodes.any { it.longDescription.isNotEmpty() } }
+                        .collect { updatedNodes ->
+                            // Push enriched nodes into UI state so selectNode sees longDescription.
+                            _uiState.update { it.copy(hierarchyNodes = updatedNodes) }
+                            withContext(Dispatchers.IO) {
+                                panoramaSaveManager.saveGlassio(
+                                    id               = savedId,
+                                    keyframes        = kfSnapshot,
+                                    panoramaWidth    = rawStitch.width,
+                                    nodes            = updatedNodes,
+                                    panoramaHeight   = rawStitch.height,
+                                    shortDescription = "",
+                                    longDescription  = "",
+                                    title            = "",
+                                )
+                                val enrichedCount = updatedNodes.count { it.longDescription.isNotEmpty() }
+                                Log.d(TAG, "Re-saved glassio: $enrichedCount/${updatedNodes.size} nodes enriched")
+                            }
+                            if (updatedNodes.all { it.longDescription.isNotEmpty() }) {
+                                announceText("Scene details ready — tap any region twice for description")
+                            }
+                        }
                 }
             }
             Log.d(TAG, "Hierarchy watcher done — $n nodes, button promoted to PANORAMA_DONE")
@@ -566,16 +597,32 @@ class StreamViewModel(
      * Announces the node label and its approximate o'clock position
      * derived from its horizontal fraction in the panorama.
      */
-    /** Select a node by index (e.g. from a direct button tap in the panorama overlay). */
+    /** Select a node by index (e.g. from a direct button tap in the panorama overlay).
+     *
+     * First tap: announces the short label and clock position.
+     * Second tap on the same node: announces the detailed description if available.
+     *
+     * Reads nodes from the processor directly so longDescription is always current,
+     * regardless of whether the _uiState enrichment collect loop is still running.
+     */
     fun selectNode(index: Int) {
-        val nodes = _uiState.value.hierarchyNodes
+        val processorId = wearablesViewModel.uiState.value.selectedProcessorId
+        val pp = OnDeviceProcessorManager.getProcessor(processorId)
+            as? com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
+        val nodes = pp?.hierarchyNodes?.takeIf { it.isNotEmpty() }
+            ?: _uiState.value.hierarchyNodes
         if (index !in nodes.indices) return
+        val node        = nodes[index]
+        val isSecondTap = _uiState.value.currentNodeIndex == index
         _uiState.update { it.copy(currentNodeIndex = index) }
-        val node   = nodes[index]
-        val oClock = angleToOClock(
-            angleFromCenterDeg = (node.panoramaXFraction - 0.5f) * _uiState.value.carouselAngularSpanDeg
-        )
-        announceText("${node.label}, $oClock o'clock")
+        if (isSecondTap && node.longDescription.isNotEmpty()) {
+            announceText(node.longDescription)
+        } else {
+            val oClock = angleToOClock(
+                angleFromCenterDeg = (node.panoramaXFraction - 0.5f) * _uiState.value.carouselAngularSpanDeg
+            )
+            announceText("${node.label}, $oClock o'clock")
+        }
     }
 
     fun stepNode(delta: Int) {

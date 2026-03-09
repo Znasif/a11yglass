@@ -229,6 +229,7 @@ class PanoramaSaveManager(context: Context) {
                                 })
                                 put("title",                  node.label)
                                 put("description",            node.description)
+                                put("longDescription",        node.longDescription)
                                 put("panoramaXFraction",      node.panoramaXFraction.toDouble())
                                 put("panoramaYFraction",      node.panoramaYFraction.toDouble())
                                 put("panoramaWidthFraction",  node.panoramaWidthFraction.toDouble())
@@ -315,7 +316,11 @@ class PanoramaSaveManager(context: Context) {
      *
      * Returned bitmaps are freshly decoded and owned by the caller.
      * Blocking — call on a background thread.
+     * adb pull "/storage/emulated/0/Android/data/com.a11yos.app/files/panoramas/"
+     *   "C:\Users\znasi\Desktop\panoramas"
      */
+
+
     data class GlassioData(
         val keyframes: List<Keyframe>,
         val nodes: List<HierarchyNode> = emptyList(),
@@ -411,6 +416,7 @@ class PanoramaSaveManager(context: Context) {
                             panoramaHeightFraction= h.optDouble("panoramaHeightFraction", 1.0).toFloat(),
                             keyframeIndex         = -1,
                             description           = h.optString("description"),
+                            longDescription       = h.optString("longDescription"),
                             color                 = color,
                             polygonXY             = polygon,
                         )
