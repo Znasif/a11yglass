@@ -5,9 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-03-11
+
+
+### Added
+
+- [API] Sealed interface `CaptureError` for photo capture error handling with typed error cases: `DeviceDisconnected`, `NotStreaming`, `CaptureInProgress`, and `CaptureFailed`.
+- [API] Enum `LinkState` representing device connectivity state with values `CONNECTING`, `CONNECTED`, and `DISCONNECTED`. Brings parity with iOS SDK.
+- AI coding agents config files: AGENTS.md, Claude skills, Cursor rules, Copilot instructions.
+
+### Changed
+
+- [API] `StreamSession.capturePhoto()` now returns `DatResult<PhotoData, CaptureError>` instead of `Result<PhotoData>`.
+- [API] `Device.linkState`: Replaces boolean `available` property with `LinkState` enum for richer connectivity state information.
+- Improved Android video decoding and playback performance.
+- [CameraAccess] Removed timer functionality.
+
+### Fixed
+
+- Fixed R8 build errors when minify is enabled.
+- Improved `DeviceSession` accuracy.
+- Fixed duplicate class errors when building with React Native.
+- Improved audio and video packet deserialization.
+- High resolution (720x1280) video can be requested.
+
 ## [0.4.0] - 2026-02-03
 
-> **Note:** This version requires updated configuration values from Wearables Developer Center to work with release channels.
+> **Note:** This version requires updated configuration values from Wearables Developer Center for release channel functionality.
 
 ### Added
 
@@ -39,15 +63,15 @@ instead of a Context.
 
 ### Changed
 
-- [API] Updated permission functions to return `DatResult<PermissionStatus, PermissionError>` instead of `PermissionStatus`.
+- [API] Permission functions now return `DatResult<PermissionStatus, PermissionError>` instead of `PermissionStatus`.
 - [API] In `PermissionError`, `COMPANION_APP_NOT_INSTALLED` has been renamed to `META_AI_NOT_INSTALLED`.
 - The Camera Access app streaming UX reflects device availability.
 - The Camera Access app shows errors when incompatible glasses are found.
 
 ### Fixed
 
-- Fixed orientation of images caputured by `MockDevice`.
-- Streaming status is set to `stopped` if permission is not granted.
+- Fixed orientation of images captured by `MockDevice`.
+- Streaming status becomes `stopped` when permission is not granted.
 - Fixed invalidation of flow from `Wearables.getDeviceSessionState` after streaming stops.
 - Fixed UI issues in the Camera Access app.
 
@@ -74,14 +98,14 @@ instead of a Context.
 
 ### Changed
 
-- [API] The SDK is now split into components, allowing independent inclusion in projects as needed.
+- [API] The SDK now splits into components for independent project inclusion.
 - [API] Calling any `Wearables` function without initialization throws a WearablesException.
 - [API] Permission API updated for better consistency with iOS:
   - `checkPermission` renamed to `checkPermissionStatus`.
   - `AskPermissionContract` renamed to `RequestpermissionContract`.
   - `PermissionGrantState` replaced by `PermissionStatus`, with values `GRANTED` and `DENIED`.
   - Updated the set of values of `PermissionError`.
-- [API] Permission requests no longer throw exceptions, but they return an `Error` instead.
+- [API] Permission requests now return an `Error` instead of throwing exceptions.
 - [API] `RegistrationError` now holds different errors, aligning more closely with the iOS SDK.
 - [API] `DeviceSelector`'s select method replaced by an active device Flow.
 - [API] Renamed `DeviceType` enum values.

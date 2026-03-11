@@ -45,6 +45,15 @@ class MainActivity : ComponentActivity() {
 
   val viewModel: WearablesViewModel by viewModels()
 
+  private val permissionCheckLauncher =
+      registerForActivityResult(RequestMultiplePermissions()) { permissionsResult ->
+        viewModel.onPermissionsResult(permissionsResult) {
+          // Initialize the DAT SDK once the permissions are granted
+          // This is REQUIRED before using any Wearables APIs
+          Wearables.initialize(this)
+        }
+      }
+
   private var permissionContinuation: CancellableContinuation<PermissionStatus>? = null
   private val permissionMutex = Mutex()
   // Requesting wearable device permissions via the Meta AI app
@@ -70,17 +79,6 @@ class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
-
-    // First, ensure the app has necessary Android permissions
-    checkPermissions {
-      // Initialize the DAT SDK once the permissions are granted
-      // This is REQUIRED before using any Wearables APIs
-      Wearables.initialize(this)
-
-      // Start observing Wearables state after SDK is initialized
-      viewModel.startMonitoring()
-    }
-
     setContent {
       CameraAccessScaffold(
           viewModel = viewModel,
@@ -89,17 +87,9 @@ class MainActivity : ComponentActivity() {
     }
   }
 
-  fun checkPermissions(onPermissionsGranted: () -> Unit) {
-    registerForActivityResult(RequestMultiplePermissions()) { permissionsResult ->
-          val granted = permissionsResult.entries.all { it.value }
-          if (granted) {
-            onPermissionsGranted()
-          } else {
-            viewModel.setRecentError(
-                "Allow All Permissions (Bluetooth, Bluetooth Connect, Internet)"
-            )
-          }
-        }
-        .launch(PERMISSIONS)
+  override fun onStart() {
+    super.onStart()
+    // First, ensure the app has necessary Android permissions
+    permissionCheckLauncher.launch(PERMISSIONS)
   }
 }

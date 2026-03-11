@@ -70,11 +70,11 @@ fun CameraAccessScaffold(
   val snackbarHostState = remember { SnackbarHostState() }
   val bottomSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-  // Observe camera permission errors and show snackbar
+  // Observe recent errors and show snackbar
   LaunchedEffect(uiState.recentError) {
     uiState.recentError?.let { errorMessage ->
       snackbarHostState.showSnackbar(errorMessage)
-      viewModel.clearCameraPermissionError()
+      viewModel.clearRecentError()
     }
   }
 

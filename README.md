@@ -1,7 +1,7 @@
 # Meta Wearables Device Access Toolkit for Android
 
-[![Maven](https://img.shields.io/badge/Maven-0.4.0-brightgreen?logo=apachemaven)](https://github.com/orgs/facebook/packages?repo_name=meta-wearables-dat-android)
-[![Docs](https://img.shields.io/badge/API_Reference-0.4-blue?logo=meta)](https://wearables.developer.meta.com/docs/reference/android/dat/0.4)
+[![Maven](https://img.shields.io/badge/Maven-0.5.0-brightgreen?logo=apachemaven)](https://github.com/orgs/facebook/packages?repo_name=meta-wearables-dat-android)
+[![Docs](https://img.shields.io/badge/API_Reference-0.5-blue?logo=meta)](https://wearables.developer.meta.com/docs/reference/android/dat/0.5)
 
 The Meta Wearables Device Access Toolkit enables developers to utilize Meta's AI glasses to build hands-free wearable experiences into their mobile applications.
 By integrating this SDK, developers can reliably connect to Meta's AI glasses and leverage capabilities like video streaming and photo capture.
@@ -60,7 +60,7 @@ Check the available versions in [GitHub Packages](https://github.com/orgs/facebo
 
 ```toml
 [versions]
-mwdat = "0.4.0"
+mwdat = "0.5.0"
 
 [libraries]
 mwdat-core = { group = "com.meta.wearable", name = "mwdat-core", version.ref = "mwdat" }
@@ -129,6 +129,40 @@ app's `AndroidManifest.xml` file within the `<application>` element:
     <!-- Your activities and other components -->
 </application>
 ```
+
+## AI-Assisted Development
+
+This repository includes AI development skills that work with [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Cursor](https://cursor.sh/), and other AI coding assistants that support project-level context.
+
+### Quick setup
+
+Add the skills to your project with a single command:
+
+```bash
+curl -sL https://raw.githubusercontent.com/facebook/meta-wearables-dat-android/main/install-skills.sh | bash
+```
+
+Or manually download the `.claude/` directory into your project root:
+
+```bash
+cd your-project
+curl -sL https://github.com/facebook/meta-wearables-dat-android/archive/refs/heads/main.tar.gz \
+  | tar xz --strip-components=1 'meta-wearables-dat-android-main/.claude'
+```
+
+If you cloned this repository, the skills are already included — no setup needed.
+
+### What's included
+
+- **Getting started** — SDK setup, Gradle integration, manifest configuration
+- **Camera streaming** — StreamSession, video frames, resolution/frame rate, photo capture
+- **MockDevice testing** — Test without physical glasses using MockDeviceKit
+- **Session lifecycle** — Device session states, pause/resume, availability
+- **Permissions & registration** — App registration, camera permission flows
+- **Debugging** — Common issues, Developer Mode, version compatibility
+- **Sample app guide** — Building a complete DAT app
+
+Skills are loaded automatically from `.claude/settings.json` when your AI assistant opens the project.
 
 ## License
 

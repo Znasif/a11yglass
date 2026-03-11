@@ -28,6 +28,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
@@ -60,12 +61,16 @@ fun StreamScreen(
 
   Box(modifier = modifier.fillMaxSize()) {
     streamUiState.videoFrame?.let { videoFrame ->
-      Image(
-          bitmap = videoFrame.asImageBitmap(),
-          contentDescription = stringResource(R.string.live_stream),
-          modifier = Modifier.fillMaxSize(),
-          contentScale = ContentScale.Crop,
-      )
+      // Use key() to force recomposition when frame counter changes,
+      // even if the bitmap reference is the same (due to caching optimization)
+      key(streamUiState.videoFrameCount) {
+        Image(
+            bitmap = videoFrame.asImageBitmap(),
+            contentDescription = stringResource(R.string.live_stream),
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop,
+        )
+      }
     }
     if (streamUiState.streamSessionState == StreamSessionState.STARTING) {
       CircularProgressIndicator(

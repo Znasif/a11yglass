@@ -51,7 +51,7 @@ class WearablesViewModel(application: Application) : AndroidViewModel(applicatio
   private var monitoringStarted = false
   private val deviceMonitoringJobs = mutableMapOf<DeviceIdentifier, Job>()
 
-  fun startMonitoring() {
+  private fun startMonitoring() {
     if (monitoringStarted) {
       return
     }
@@ -166,12 +166,25 @@ class WearablesViewModel(application: Application) : AndroidViewModel(applicatio
     _uiState.update { it.copy(isDebugMenuVisible = false) }
   }
 
-  fun clearCameraPermissionError() {
+  fun clearRecentError() {
     _uiState.update { it.copy(recentError = null) }
   }
 
-  fun setRecentError(error: String) {
+  private fun setRecentError(error: String) {
     _uiState.update { it.copy(recentError = error) }
+  }
+
+  fun onPermissionsResult(permissionsResult: Map<String, Boolean>, onAllGranted: () -> Unit) {
+    val granted = permissionsResult.entries.all { it.value }
+    _uiState.update { it.copy(canRegister = granted) }
+    if (granted) {
+      onAllGranted()
+      startMonitoring()
+    } else {
+      _uiState.update {
+        it.copy(recentError = "Allow All Permissions (Bluetooth, Bluetooth Connect, Internet)")
+      }
+    }
   }
 
   fun showGettingStartedSheet() {

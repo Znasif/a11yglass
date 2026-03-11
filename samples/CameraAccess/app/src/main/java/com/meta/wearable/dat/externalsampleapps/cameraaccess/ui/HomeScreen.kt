@@ -29,6 +29,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -40,6 +41,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.R
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 
@@ -49,6 +51,7 @@ fun HomeScreen(
     modifier: Modifier = Modifier,
 ) {
   val scrollState = rememberScrollState()
+  val uiState by viewModel.uiState.collectAsStateWithLifecycle()
   val activity = LocalActivity.current
   val context = LocalContext.current
 
@@ -108,6 +111,7 @@ fun HomeScreen(
       )
       SwitchButton(
           label = stringResource(R.string.register_button_title),
+          enabled = uiState.canRegister,
           onClick = {
             activity?.let { viewModel.startRegistration(it) }
                 ?: Toast.makeText(context, "Activity not available", Toast.LENGTH_SHORT).show()

@@ -13,7 +13,7 @@
 // - Receiving video frames from device cameras
 // - Capturing photos during streaming sessions
 // - Handling different video qualities and formats
-// - Processing raw video data (I420 -> NV21 conversion)
+// - Processing raw video data (I420 -> ARGB conversion)
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.stream
 
@@ -21,10 +21,7 @@ import android.app.Application
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.ImageFormat
 import android.graphics.Matrix
-import android.graphics.Rect
-import android.graphics.YuvImage
 import android.util.Log
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
@@ -43,7 +40,6 @@ import com.meta.wearable.dat.core.Wearables
 import com.meta.wearable.dat.core.selectors.DeviceSelector
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -73,9 +69,32 @@ class StreamViewModel(
   private var videoJob: Job? = null
   private var stateJob: Job? = null
 
+  // Presentation queue for buffering frames after color conversion
+  private var presentationQueue: PresentationQueue? = null
+
   fun startStream() {
     videoJob?.cancel()
     stateJob?.cancel()
+    presentationQueue?.stop()
+    presentationQueue = null
+
+    // Initialize presentation queue - frames are presented based on timestamp, not arrival time
+    // Uses IntArray pooling for efficiency - cheaper than Bitmap.copy()
+    val queue =
+        PresentationQueue(
+            bufferDelayMs = 100L,
+            maxQueueSize = 15,
+            onFrameReady = { frame ->
+              // This is called from the presentation thread at regular intervals
+              // when a frame's presentation time has arrived
+              _uiState.update {
+                it.copy(videoFrame = frame.bitmap, videoFrameCount = it.videoFrameCount + 1)
+              }
+            },
+        )
+    presentationQueue = queue
+    queue.start()
+
     val streamSession =
         Wearables.startStreamSession(
                 getApplication(),
@@ -104,6 +123,8 @@ class StreamViewModel(
     videoJob = null
     stateJob?.cancel()
     stateJob = null
+    presentationQueue?.stop()
+    presentationQueue = null
     streamSession?.close()
     streamSession = null
     _uiState.update { INITIAL_STATE }
@@ -127,8 +148,8 @@ class StreamViewModel(
               handlePhotoData(photoData)
               _uiState.update { it.copy(isCapturing = false) }
             }
-            ?.onFailure {
-              Log.e(TAG, "Photo capture failed")
+            ?.onFailure { error, _ ->
+              Log.e(TAG, "Photo capture failed: ${error.description}")
               _uiState.update { it.copy(isCapturing = false) }
             }
       }
@@ -175,42 +196,21 @@ class StreamViewModel(
 
   private fun handleVideoFrame(videoFrame: VideoFrame) {
     // VideoFrame contains raw I420 video data in a ByteBuffer
-    val buffer = videoFrame.buffer
-    val dataSize = buffer.remaining()
-    val byteArray = ByteArray(dataSize)
-
-    // Save current position
-    val originalPosition = buffer.position()
-    buffer.get(byteArray)
-    // Restore position
-    buffer.position(originalPosition)
-
-    // Convert I420 to NV21 format which is supported by Android's YuvImage
-    val nv21 = convertI420toNV21(byteArray, videoFrame.width, videoFrame.height)
-    val image = YuvImage(nv21, ImageFormat.NV21, videoFrame.width, videoFrame.height, null)
-    val out =
-        ByteArrayOutputStream().use { stream ->
-          image.compressToJpeg(Rect(0, 0, videoFrame.width, videoFrame.height), 50, stream)
-          stream.toByteArray()
-        }
-
-    val bitmap = BitmapFactory.decodeByteArray(out, 0, out.size)
-    _uiState.update { it.copy(videoFrame = bitmap) }
-  }
-
-  // Convert I420 (YYYYYYYY:UUVV) to NV21 (YYYYYYYY:VUVU)
-  private fun convertI420toNV21(input: ByteArray, width: Int, height: Int): ByteArray {
-    val output = ByteArray(input.size)
-    val size = width * height
-    val quarter = size / 4
-
-    input.copyInto(output, 0, 0, size) // Y is the same
-
-    for (n in 0 until quarter) {
-      output[size + n * 2] = input[size + quarter + n] // V first
-      output[size + n * 2 + 1] = input[size + n] // U second
+    // Use optimized YuvToBitmapConverter for direct I420 to ARGB conversion
+    val bitmap =
+        YuvToBitmapConverter.convert(
+            videoFrame.buffer,
+            videoFrame.width,
+            videoFrame.height,
+        )
+    if (bitmap != null) {
+      presentationQueue?.enqueue(
+          bitmap,
+          videoFrame.presentationTimeUs,
+      )
+    } else {
+      Log.e(TAG, "Failed to convert YUV to bitmap")
     }
-    return output
   }
 
   private fun handlePhotoData(photo: PhotoData) {
