@@ -1,15 +1,16 @@
-# Ray-Ban Meta Glasses → Android WhatsAI
+# Ray-Ban Meta Glasses → Android GlassesIO
 
-An open-source Android app that connects Ray-Ban Meta smart glasses to **your own** multimodal AI server (e.g., LLaVA/Gemma/Qwen-VL server) instead of Meta AI.
+An open-source Android app that connects Ray-Ban Meta smart glasses to **your own** multimodal AI server (e.g., LLaVA/Gemma/Qwen-VL server) or on-device models (Florence V2, FastVLM) instead of Meta AI.
 
-Bypasses Meta’s cloud AI and streams live video + audio directly from the glasses to your self-hosted backend via WebSocket + REST.
+Bypasses Meta’s cloud AI and streams live video + audio directly from the glasses to your self-hosted backend via WebSocket + REST or Android MLKit on-device AI.
 
 ## Features
 
 - Full Meta Wearables DAT SDK integration (camera stream, photo capture, device state)
 - Configurable WebSocket connection to your server (ws:// or wss://)
 - Processor discovery (/processors endpoint) with dropdown selector
-- ~10 FPS JPEG frame streaming (base64) from glasses camera
+- ~10 FPS JPEG frame streaming (base64) from glasses camera to the server
+- Instead of streaming to server, can run few on-device models running on your smartphone
 - 24 kHz mono PCM live microphone streaming
 - Real-time processed frame display from server
 - Gemini-style audio response playback
@@ -51,6 +52,9 @@ MainActivity.kt                    → Permission handling
 - Your own multimodal server exposing:
   - GET /processors
   - WebSocket /ws accepting JSON frames + binary audio
+
+## Video
+[![GlassesIO Demo](https://img.youtube.com/vi/eux16pNrXVQ/0.jpg)](https://youtu.be/eux16pNrXVQ)
 
 ## License
 
