@@ -19,7 +19,7 @@ android {
   buildFeatures { buildConfig = true }
 
   defaultConfig {
-    applicationId = "com.a11yos.app"
+    applicationId = "com.a11yos.app.debug"
     minSdk = 31
     targetSdk = 34
     versionCode = 1

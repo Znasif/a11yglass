@@ -55,7 +55,6 @@ fun NonStreamScreen(
     modifier: Modifier = Modifier,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val scope = rememberCoroutineScope()
     val activity = LocalActivity.current
     val context = LocalContext.current
 

@@ -16,6 +16,12 @@
 
     <!-- Stream Screen -->
     <string name="live_stream" description="Live Stream">Live stream</string>
+    <string name="unlimited_time" description="Unlimited Time">Unlimited Time</string>
+    <string name="one_minute" description="1 Minute Timer">1m</string>
+    <string name="five_minute" description="5 Minute Timer">5m</string>
+    <string name="ten_minute" description="10 Minute Timer">10m</string>
+    <string name="fifteen_minute" description="15 Minute Timer">15m</string>
+    <string name="time_remaining" description="Time remaining in minutes and seconds">Time Remaining: <xliff:g id="minutes">%1$d</xliff:g>:<xliff:g id="seconds">%2$02d</xliff:g></string>
 
     <!-- Non Stream Screen -->
     <string name="camera_access_icon_description" description="Camera Access icon description">Camera Access icon</string>
