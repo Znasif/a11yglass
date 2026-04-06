@@ -23,10 +23,16 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import android.widget.Toast
+import androidx.activity.compose.LocalActivity
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesUiState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
@@ -45,14 +51,22 @@ fun HomeScreen(
     viewModel: WearablesViewModel,
     modifier: Modifier = Modifier,
 ) {
+  val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+  val activity = LocalActivity.current
+  val context = LocalContext.current
   HomeScreenContent(
-      onStartRegistration = { viewModel.startRegistration() },
+      uiState = uiState,
+      onStartRegistration = {
+          activity?.let { viewModel.startRegistration(it) }
+              ?: Toast.makeText(context, "Activity not available", Toast.LENGTH_SHORT).show()
+      },
       modifier = modifier,
   )
 }
 
 @Composable
 fun HomeScreenContent(
+    uiState: WearablesUiState = WearablesUiState(),
     onStartRegistration: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -105,6 +119,7 @@ fun HomeScreenContent(
       )
       SwitchButton(
           label = stringResource(R.string.register_button_title),
+          enabled = uiState.canRegister,
           onClick = onStartRegistration,
           modifier = Modifier.navigationBarsPadding(),
       )
@@ -115,7 +130,7 @@ fun HomeScreenContent(
 @Preview(showBackground = true)
 @Composable
 private fun HomeScreenPreview() {
-  HomeScreenContent(onStartRegistration = {})
+  HomeScreenContent(uiState = WearablesUiState(), onStartRegistration = {})
 }
 
 @Composable

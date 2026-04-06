@@ -33,6 +33,7 @@ import com.meta.wearable.dat.core.types.Permission
 import com.meta.wearable.dat.core.types.PermissionStatus
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.ui.CameraAccessScaffold
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
+import kotlin.coroutines.resume
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
@@ -42,8 +43,8 @@ class MainActivity : ComponentActivity() {
     companion object {
         // Required Android permissions for the DAT SDK and app to function properly
         val PERMISSIONS: Array<String> = arrayOf(
-            BLUETOOTH, 
-            BLUETOOTH_CONNECT, 
+            BLUETOOTH,
+            BLUETOOTH_CONNECT,
             INTERNET,
             RECORD_AUDIO  // Added for audio streaming to server
         )
@@ -51,13 +52,23 @@ class MainActivity : ComponentActivity() {
 
     val viewModel: WearablesViewModel by viewModels()
 
+    private val permissionCheckLauncher =
+        registerForActivityResult(RequestMultiplePermissions()) { permissionsResult ->
+            viewModel.onPermissionsResult(permissionsResult) {
+                // Initialize the DAT SDK once the permissions are granted
+                // This is REQUIRED before using any Wearables APIs
+                Wearables.initialize(this)
+            }
+        }
+
     private var permissionContinuation: CancellableContinuation<PermissionStatus>? = null
     private val permissionMutex = Mutex()
-    
+
     // Requesting wearable device permissions via the Meta AI app
     private val permissionsResultLauncher =
         registerForActivityResult(Wearables.RequestPermissionContract()) { result ->
-            permissionContinuation?.resume(result, null)
+            val permissionStatus = result.getOrDefault(PermissionStatus.Denied)
+            permissionContinuation?.resume(permissionStatus)
             permissionContinuation = null
         }
 
@@ -76,17 +87,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
-        // First, ensure the app has necessary Android permissions
-        checkPermissions {
-            // Initialize the DAT SDK once the permissions are granted
-            // This is REQUIRED before using any Wearables APIs
-            Wearables.initialize(this)
-
-            // Start observing Wearables state after SDK is initialized
-            viewModel.startMonitoring()
-        }
-
         setContent {
             CameraAccessScaffold(
                 viewModel = viewModel,
@@ -95,36 +95,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    fun checkPermissions(onPermissionsGranted: () -> Unit) {
-        registerForActivityResult(RequestMultiplePermissions()) { permissionsResult ->
-            val granted = permissionsResult.entries.all { it.value }
-            if (granted) {
-                onPermissionsGranted()
-            } else {
-                // Check which permissions were denied
-                val deniedPermissions = permissionsResult.entries
-                    .filter { !it.value }
-                    .map { it.key }
-                    .joinToString(", ") { permission ->
-                        when (permission) {
-                            BLUETOOTH -> "Bluetooth"
-                            BLUETOOTH_CONNECT -> "Bluetooth Connect"
-                            INTERNET -> "Internet"
-                            RECORD_AUDIO -> "Microphone"
-                            else -> permission
-                        }
-                    }
-                
-                viewModel.setRecentError(
-                    "Please allow permissions: $deniedPermissions"
-                )
-            }
-        }.launch(PERMISSIONS)
-    }
-    
-    override fun onDestroy() {
-        super.onDestroy()
-        // Clean up server repository when activity is destroyed
-        viewModel.serverRepository.cleanup()
+    override fun onStart() {
+        super.onStart()
+        // First, ensure the app has necessary Android permissions
+        permissionCheckLauncher.launch(PERMISSIONS)
     }
 }

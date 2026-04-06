@@ -28,7 +28,9 @@ data class WearablesUiState(
     val hasMockDevices: Boolean = false,
     val isDebugMenuVisible: Boolean = false,
     val isGettingStartedSheetVisible: Boolean = false,
-    
+    val hasActiveDevice: Boolean = false,
+    val canRegister: Boolean = false,
+
     // Server connection state
     val serverUrl: String = "wss://w4cdrdoe55szp3-8000.proxy.runpod.net/ws",
     val connectionState: ConnectionState = ConnectionState.Disconnected,
@@ -43,7 +45,10 @@ data class WearablesUiState(
     val serverResponseText: String = "",
     val lastStatusMessage: String = "",
 ) {
-    val isRegistered: Boolean = registrationState is RegistrationState.Registered || hasMockDevices
+    val isRegistered: Boolean =
+        registrationState is RegistrationState.Registered ||
+            registrationState is RegistrationState.Unregistering ||
+            hasMockDevices
     
     val selectedProcessor: ProcessorInfo? = processors.find { it.id == selectedProcessorId }
 

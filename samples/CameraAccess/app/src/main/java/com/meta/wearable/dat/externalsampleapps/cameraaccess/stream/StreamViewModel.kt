@@ -41,7 +41,6 @@ import com.meta.wearable.dat.camera.types.StreamSessionState
 import com.meta.wearable.dat.camera.types.VideoFrame
 import com.meta.wearable.dat.camera.types.VideoQuality
 import com.meta.wearable.dat.core.Wearables
-import com.meta.wearable.dat.core.selectors.AutoDeviceSelector
 import com.meta.wearable.dat.core.selectors.DeviceSelector
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.AudioPlaybackManager
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.AudioStreamManager
@@ -84,8 +83,7 @@ class StreamViewModel(
         private const val FRAME_DELAY_MS = 100L  // Delay between frames
     }
 
-    // AutoDeviceSelector automatically selects the first available wearable device
-    private val deviceSelector: DeviceSelector = AutoDeviceSelector()
+    private val deviceSelector: DeviceSelector = wearablesViewModel.deviceSelector
     private var streamSession: StreamSession? = null
 
     private val _uiState = MutableStateFlow(INITIAL_STATE)

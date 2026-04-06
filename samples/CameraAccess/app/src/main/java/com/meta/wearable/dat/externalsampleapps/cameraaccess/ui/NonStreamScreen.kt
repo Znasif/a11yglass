@@ -23,8 +23,11 @@ import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import android.widget.Toast
+import androidx.activity.compose.LocalActivity
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -53,10 +56,15 @@ fun NonStreamScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
+    val activity = LocalActivity.current
+    val context = LocalContext.current
 
     NonStreamScreenContent(
         uiState = uiState,
-        onDisconnect = { viewModel.startUnregistration() },
+        onDisconnect = {
+            activity?.let { viewModel.startUnregistration(it) }
+                ?: Toast.makeText(context, "Activity not available", Toast.LENGTH_SHORT).show()
+        },
         onSetServerUrl = { viewModel.setServerUrl(it) },
         onConnectToServer = { viewModel.connectToServer() },
         onDisconnectFromServer = { viewModel.disconnectFromServer() },
