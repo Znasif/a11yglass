@@ -14,6 +14,15 @@ package com.meta.wearable.dat.externalsampleapps.cameraaccess.stream
 
 import android.graphics.Bitmap
 import com.meta.wearable.dat.camera.types.StreamSessionState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.SavedPanorama
+
+enum class CaptureButtonMode {
+    CAMERA,              // Default: start sweep / photo capture
+    RECORDING,           // Panorama sweep in progress — shows Stop
+    PANORAMA_ANALYZING,  // Stitched; hierarchy building — Explore button disabled
+    PANORAMA_DONE,       // Hierarchy ready — Explore button enabled
+    PROXY_ACTIVE,        // In Reality Proxy mode — press to exit
+}
 
 data class StreamUiState(
     // DAT streaming state
@@ -34,17 +43,27 @@ data class StreamUiState(
     val isAudioMuted: Boolean = false,
     val isPlayingAudio: Boolean = false,  // Playing back Gemini audio response
     
+    // Voice command state
+    val voiceTranscript: String = "",      // Last 50 chars of transcript
+    val isVoiceListening: Boolean = false, // Shows if voice commands are active
+    
+    // Camera button mode (changes per processor phase)
+    val captureButtonMode: CaptureButtonMode = CaptureButtonMode.CAMERA,
+
     // Status
     val statusMessage: String = "",
     val errorMessage: String? = null,
+
+    // Saved panorama picker
+    val savedPanoramas: List<SavedPanorama> = emptyList(),
+    val showPanoramaPicker: Boolean = false,
 ) {
     /**
-     * Get the frame to display - prefer processed frame over raw camera frame.
+     * Get the frame to display.
+     * Prefers processedFrame whenever it is set — this keeps the stitched panorama
+     * visible after isStreamingToServer is cleared (finishPanoramaCapture), and
+     * falls back to the raw camera feed otherwise.
      */
     val displayFrame: Bitmap?
-        get() = if (isStreamingToServer && processedFrame != null) {
-            processedFrame
-        } else {
-            videoFrame
-        }
+        get() = processedFrame ?: videoFrame
 }

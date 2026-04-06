@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -88,14 +90,29 @@ fun ProcessorSpinner(
                 processors.forEach { processor ->
                     DropdownMenuItem(
                         text = {
-                            Text(
-                                text = processor.name,
-                                color = if (processor.id == selectedProcessorId) {
-                                    Color.Cyan
-                                } else {
-                                    Color.White
-                                }
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (processor.isOnDevice) {
+                                        Icons.Default.PhoneAndroid
+                                    } else {
+                                        Icons.Default.Cloud
+                                    },
+                                    contentDescription = if (processor.isOnDevice) "On-device" else "Server",
+                                    tint = if (processor.isOnDevice) Color.Green else Color.Cyan,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = processor.name,
+                                    color = if (processor.id == selectedProcessorId) {
+                                        Color.Cyan
+                                    } else {
+                                        Color.White
+                                    }
+                                )
+                            }
                         },
                         onClick = {
                             onProcessorSelected(processor.id)

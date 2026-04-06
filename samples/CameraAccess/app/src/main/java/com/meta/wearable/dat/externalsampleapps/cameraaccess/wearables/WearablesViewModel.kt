@@ -28,6 +28,7 @@ import com.meta.wearable.dat.core.types.RegistrationState
 import com.meta.wearable.dat.mockdevice.MockDeviceKit
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.network.ConnectionState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.network.ServerRepository
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessorManager
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -50,6 +51,10 @@ class WearablesViewModel(application: Application) : AndroidViewModel(applicatio
     private var monitoringStarted = false
 
     init {
+        // Initialize on-device processors and load them into state
+        OnDeviceProcessorManager.initialize(application)
+        loadOnDeviceProcessors()
+
         // Start observing server connection state
         viewModelScope.launch {
             serverRepository.connectionState.collect { state ->
@@ -147,33 +152,62 @@ class WearablesViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /**
+     * Load on-device processors into the UI state.
+     * Auto-selects first processor if none is currently selected.
+     */
+    private fun loadOnDeviceProcessors() {
+        val onDeviceList = OnDeviceProcessorManager.getOnDeviceProcessorInfoList()
+        _uiState.update { state ->
+            val combined = (onDeviceList + state.processors).toImmutableList()
+            // Auto-select first on-device processor if no processor is selected
+            val newSelectedId = if (state.selectedProcessorId == 0 && combined.isNotEmpty()) {
+                combined.first().id
+            } else {
+                state.selectedProcessorId
+            }
+            state.copy(
+                processors = combined,
+                selectedProcessorId = newSelectedId
+            )
+        }
+    }
+
+    /**
      * Fetch available processors from the server.
+     * On-device processors are always included, even if server fetch fails.
      */
     fun fetchProcessors() {
         viewModelScope.launch {
             _uiState.update { it.copy(isFetchingProcessors = true) }
-            
+
+            val onDeviceProcessors = OnDeviceProcessorManager.getOnDeviceProcessorInfoList()
             val result = serverRepository.fetchProcessors(_uiState.value.serverUrl)
 
-            result.onSuccess { processorList ->
-                val immutableProcessors = processorList.toImmutableList()  // ✅ Computed outside
+            result.onSuccess { serverProcessors ->
+                val combined = (onDeviceProcessors + serverProcessors).toImmutableList()
                 val currentSelectedId = _uiState.value.selectedProcessorId
-                val newSelectedId = if (currentSelectedId == 0 && processorList.isNotEmpty()) {
-                    processorList.first().id
+                val newSelectedId = if (currentSelectedId == 0 && combined.isNotEmpty()) {
+                    combined.first().id
                 } else {
                     currentSelectedId
                 }
 
                 _uiState.update { state ->
                     state.copy(
-                        processors = immutableProcessors,  // ✅ Just pass the pre-computed value
+                        processors = combined,
                         isFetchingProcessors = false,
                         selectedProcessorId = newSelectedId
                     )
                 }
             }.onFailure { error ->
-                _uiState.update { it.copy(isFetchingProcessors = false) }
-                setRecentError("Failed to fetch processors: ${error.message}")
+                // Still show on-device processors even if server fails
+                _uiState.update { state ->
+                    state.copy(
+                        processors = onDeviceProcessors.toImmutableList(),
+                        isFetchingProcessors = false
+                    )
+                }
+                setRecentError("Failed to fetch server processors: ${error.message}")
             }
         }
     }
@@ -256,5 +290,6 @@ class WearablesViewModel(application: Application) : AndroidViewModel(applicatio
     override fun onCleared() {
         super.onCleared()
         serverRepository.cleanup()
+        OnDeviceProcessorManager.release()
     }
 }

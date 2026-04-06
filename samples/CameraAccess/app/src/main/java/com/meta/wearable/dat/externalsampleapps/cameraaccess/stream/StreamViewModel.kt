@@ -46,7 +46,11 @@ import com.meta.wearable.dat.core.selectors.DeviceSelector
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.AudioPlaybackManager
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.AudioStreamManager
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.TextToSpeechManager
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.audio.VoiceCommandManager
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.network.models.ParsedResponse
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessorManager
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.OnDeviceProcessorResult
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaSaveManager
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -89,10 +93,14 @@ class StreamViewModel(
 
     private val streamTimer = StreamTimer()
 
+    // Panorama persistence
+    private val panoramaSaveManager = PanoramaSaveManager(application)
+
     // Audio managers
     private val audioStreamManager = AudioStreamManager(application)
     private val audioPlaybackManager = AudioPlaybackManager()
     private val ttsManager = TextToSpeechManager(application)
+    private val voiceCommandManager = VoiceCommandManager(application)
 
     // Jobs for various coroutines
     private var videoJob: Job? = null
@@ -100,6 +108,8 @@ class StreamViewModel(
     private var timerJob: Job? = null
     private var serverResponseJob: Job? = null
     private var frameStreamingJob: Job? = null
+    private var localProcessingJob: Job? = null
+    private var hierarchyReadyJob: Job? = null
 
     // Frame streaming state
     // Use SharedFlow with replay=1 and DROP_OLDEST to ensure we always have the latest frame available
@@ -157,14 +167,30 @@ class StreamViewModel(
             }
         }
 
+        // Pre-load saved panorama list so the gallery button is ready immediately.
+        viewModelScope.launch(Dispatchers.IO) {
+            refreshSavedPanoramas()
+        }
+
         // Clear processed frame when processor changes (discard old processor's frames)
         viewModelScope.launch {
             var lastProcessorId = -1
             wearablesViewModel.uiState.collect { state ->
                 if (lastProcessorId != -1 && state.selectedProcessorId != lastProcessorId) {
-                    // Processor changed - clear old frame, TTS will naturally update with new responses
-                    _uiState.update { it.copy(processedFrame = null, responseText = "") }
-                    Log.d(TAG, "Processor changed from $lastProcessorId to ${state.selectedProcessorId}, cleared old frame")
+                    // Cancel any in-flight panorama hierarchy job so it can't mutate UI
+                    // state (e.g. call buildAnnotatedPanorama on a recycled bitmap) after
+                    // the user switches away.
+                    hierarchyReadyJob?.cancel()
+                    hierarchyReadyJob = null
+                    // Reset UI to a clean baseline for the incoming processor.
+                    _uiState.update { it.copy(
+                        processedFrame     = null,
+                        responseText       = "",
+                        captureButtonMode  = CaptureButtonMode.CAMERA,
+                        isStreamingToServer = false,
+                        statusMessage      = "",
+                    ) }
+                    Log.d(TAG, "Processor changed from $lastProcessorId to ${state.selectedProcessorId}")
                 }
                 lastProcessorId = state.selectedProcessorId
             }
@@ -202,11 +228,13 @@ class StreamViewModel(
                 }
             }
         }
+
     }
 
     fun stopStream() {
         stopServerStreaming()
         stopAudioStreaming()
+        stopVoiceCommands()
 
         videoJob?.cancel()
         videoJob = null
@@ -214,6 +242,10 @@ class StreamViewModel(
         stateJob = null
         frameStreamingJob?.cancel()
         frameStreamingJob = null
+        localProcessingJob?.cancel()
+        localProcessingJob = null
+        hierarchyReadyJob?.cancel()
+        hierarchyReadyJob = null
 
         streamSession?.close()
         streamSession = null
@@ -222,18 +254,275 @@ class StreamViewModel(
         _uiState.update { INITIAL_STATE }
     }
 
-    // ========== Server Streaming Methods ==========
+    // ========== Streaming Methods (Local & Server) ==========
 
     /**
-     * Start streaming frames to the server.
+     * Start streaming frames for processing.
+     * Routes to on-device or server processing based on selected processor.
      */
     @OptIn(FlowPreview::class)
     fun startServerStreaming() {
         if (_uiState.value.isStreamingToServer) {
-            Log.w(TAG, "Already streaming to server")
+            Log.w(TAG, "Already streaming")
             return
         }
 
+        val selectedProcessorId = wearablesViewModel.uiState.value.selectedProcessorId
+
+        if (OnDeviceProcessorManager.isOnDeviceProcessor(selectedProcessorId)) {
+            startLocalProcessing(selectedProcessorId)
+        } else {
+            startRemoteStreaming()
+        }
+    }
+
+    /**
+     * Start processing frames locally using an on-device processor.
+     */
+    @OptIn(FlowPreview::class)
+    private fun startLocalProcessing(processorId: Int) {
+        val processor = OnDeviceProcessorManager.getProcessor(processorId)
+        if (processor == null) {
+            _uiState.update { it.copy(errorMessage = "On-device processor not found") }
+            return
+        }
+
+        _uiState.update {
+            it.copy(
+                isStreamingToServer = true,
+                statusMessage = "Processing on-device: ${processor.name}"
+            )
+        }
+
+        localProcessingJob = viewModelScope.launch(Dispatchers.Default) {
+            var flow: kotlinx.coroutines.flow.Flow<Bitmap> = _videoFrameFlow.asSharedFlow()
+
+            if (FRAME_DELAY_MS > 0) {
+                flow = flow.sample(FRAME_DELAY_MS)
+            }
+
+            flow.collect { bitmap ->
+                if (_uiState.value.isStreamingToServer) {
+                    try {
+                        val result = processor.process(bitmap)
+                        handleLocalProcessorResult(result)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Local processing error: ${e.message}")
+                    } catch (e: OutOfMemoryError) {
+                        Log.e(TAG, "OOM in local processor — freeing memory and stopping")
+                        System.gc()
+                        stopServerStreaming()
+                    }
+                }
+            }
+        }
+
+        Log.d(TAG, "Started local processing with: ${processor.name}")
+    }
+
+    /**
+     * Handle a result from an on-device processor.
+     * Reuses the same UI update pattern as handleServerResponse.
+     */
+    private fun handleLocalProcessorResult(result: OnDeviceProcessorResult) {
+        result.processedImage?.let { bitmap ->
+            _uiState.update { it.copy(processedFrame = bitmap) }
+        }
+
+        result.text?.let { text ->
+            if (text.isNotBlank()) {
+                _uiState.update { it.copy(responseText = text) }
+                wearablesViewModel.updateServerResponseText(text)
+
+                if (!_uiState.value.isAudioMuted) {
+                    ttsManager.speak(text)
+                }
+            }
+        }
+
+        // Panorama-specific: when process() signals stitch complete, tear down the job
+        // without calling stopServerStreaming() so processedFrame (the stitch) is preserved,
+        // then start watching for hierarchy completion to activate the Explore button.
+        if (result.text?.startsWith("Panorama complete") == true) {
+            val processorId = wearablesViewModel.uiState.value.selectedProcessorId
+            if (OnDeviceProcessorManager.getProcessor(processorId) is
+                com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
+            ) {
+                finishPanoramaCapture()
+                startHierarchyWatcher()
+            }
+        }
+    }
+
+    /**
+     * Terminates the local processing job after a panorama sweep completes.
+     * Does NOT clear processedFrame — the stitched panorama stays visible.
+     * Pauses video capture so the camera is not running while the user is
+     * reviewing the static panorama.
+     */
+    private fun finishPanoramaCapture() {
+        localProcessingJob?.cancel()
+        localProcessingJob = null
+        pauseVideoCapture()
+        _uiState.update { current ->
+            current.copy(
+                isStreamingToServer = false,
+                statusMessage = "Panorama ready — building scene map…",
+                captureButtonMode = CaptureButtonMode.PANORAMA_ANALYZING,
+            )
+        }
+        Log.d(TAG, "Panorama capture finished — stitch preserved, camera paused")
+    }
+
+    /**
+     * Pause the video feed by cancelling the frame-collection job.
+     * The StreamSession remains open; [resumeVideoCapture] restarts collection.
+     */
+    private fun pauseVideoCapture() {
+        videoJob?.cancel()
+        videoJob = null
+        Log.d(TAG, "Video capture paused")
+    }
+
+    /**
+     * Resume video collection from the existing StreamSession.
+     * No-op if already running or no session is open.
+     */
+    private fun resumeVideoCapture() {
+        if (videoJob != null) return
+        val session = streamSession ?: return
+        videoJob = viewModelScope.launch {
+            session.videoStream.collect { handleVideoFrame(it) }
+        }
+        Log.d(TAG, "Video capture resumed")
+    }
+
+    /**
+     * Watch [PanoramaProcessor.hierarchyReady] and drive TTS progress updates until
+     * the hierarchy finishes, then promote the capture button to [CaptureButtonMode.PANORAMA_DONE].
+     *
+     * Called immediately after [finishPanoramaCapture] when stitching completes.
+     * The watcher polls every second so the elapsed-time messages stay accurate.
+     */
+    private fun startHierarchyWatcher(autoSave: Boolean = true) {
+        val processorId = wearablesViewModel.uiState.value.selectedProcessorId
+        val pp = OnDeviceProcessorManager.getProcessor(processorId)
+            as? com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
+            ?: return
+
+        hierarchyReadyJob?.cancel()
+        hierarchyReadyJob = viewModelScope.launch {
+            val startMs = System.currentTimeMillis()
+            var lastAnnounceMs = startMs
+            var firstAnnounced = false
+
+            while (!pp.hierarchyReady.value) {
+                val now = System.currentTimeMillis()
+                when {
+                    !firstAnnounced -> {
+                        firstAnnounced = true
+                        lastAnnounceMs = now
+                        announceText("Analyzing scene…")
+                    }
+                    now - lastAnnounceMs > 10_000L -> {
+                        lastAnnounceMs = now
+                        val secs = (now - startMs) / 1000
+                        announceText("Still analyzing… ${secs}s elapsed")
+                    }
+                }
+                delay(1_000L)
+            }
+
+            // Hierarchy is ready — activate the Explore button and apply colored overlays.
+            val n = pp.hierarchyNodeCount
+            val annotated = pp.buildAnnotatedPanorama()
+            _uiState.update { state ->
+                state.copy(
+                    captureButtonMode = CaptureButtonMode.PANORAMA_DONE,
+                    processedFrame = annotated ?: state.processedFrame,
+                )
+            }
+            announceText("Panorama ready — $n region${if (n == 1) "" else "s"} found")
+
+            // Auto-save the raw stitch so it can be re-analyzed on load.
+            // Skip when this watcher was started for a reload (file already on disk).
+            if (autoSave) {
+                val rawStitch = pp.stitchedResult
+                if (rawStitch != null) {
+                    viewModelScope.launch(Dispatchers.IO) {
+                        panoramaSaveManager.save(rawStitch, n)
+                        refreshSavedPanoramas()
+                        Log.d(TAG, "Auto-saved raw panorama with $n nodes")
+                    }
+                }
+            }
+            Log.d(TAG, "Hierarchy watcher done — $n nodes, button promoted to PANORAMA_DONE")
+        }
+    }
+
+    // ========== Saved Panorama Picker ==========
+
+    fun showPanoramaPicker() {
+        viewModelScope.launch(Dispatchers.IO) {
+            refreshSavedPanoramas()  // refresh list just before showing
+            _uiState.update { it.copy(showPanoramaPicker = true) }
+        }
+    }
+
+    fun hidePanoramaPicker() {
+        _uiState.update { it.copy(showPanoramaPicker = false) }
+    }
+
+    fun loadSavedPanorama(id: String) {
+        val processorId = wearablesViewModel.uiState.value.selectedProcessorId
+        val pp = OnDeviceProcessorManager.getProcessor(processorId)
+            as? com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
+            ?: return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val bitmap = panoramaSaveManager.load(id) ?: return@launch
+
+            // Hand the raw stitch to the processor — it will re-run Florence and
+            // signal hierarchyReady when done, just like after a live sweep.
+            pp.loadAndAnalyzePanorama(bitmap)
+
+            _uiState.update { it.copy(
+                processedFrame     = bitmap,
+                captureButtonMode  = CaptureButtonMode.PANORAMA_ANALYZING,
+                showPanoramaPicker = false,
+                statusMessage      = "Re-analyzing saved panorama…",
+            ) }
+
+            // Reuse the same watcher that drives the Explore button after a live sweep.
+            // autoSave=false: file is already on disk, don't create a duplicate.
+            startHierarchyWatcher(autoSave = false)
+        }
+    }
+
+    fun deleteSavedPanorama(id: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            panoramaSaveManager.delete(id)
+            refreshSavedPanoramas()
+        }
+    }
+
+    private suspend fun refreshSavedPanoramas() {
+        val list = panoramaSaveManager.listSaved()
+        _uiState.update { it.copy(savedPanoramas = list) }
+    }
+
+    /** Update responseText, forward to server repository, and optionally speak via TTS. */
+    private fun announceText(text: String) {
+        _uiState.update { it.copy(responseText = text) }
+        wearablesViewModel.updateServerResponseText(text)
+        if (!_uiState.value.isAudioMuted) ttsManager.speak(text)
+    }
+
+    /**
+     * Start streaming frames to the remote server.
+     */
+    @OptIn(FlowPreview::class)
+    private fun startRemoteStreaming() {
         if (!wearablesViewModel.serverRepository.isConnected()) {
             _uiState.update { it.copy(errorMessage = "Not connected to server") }
             return
@@ -246,29 +535,21 @@ class StreamViewModel(
             )
         }
 
-        // Start the frame streaming loop using Flow
         frameStreamingJob = viewModelScope.launch(Dispatchers.Default) {
-             // Explicitly type as Flow<Bitmap> so we can reassign with sample() result
              var flow: kotlinx.coroutines.flow.Flow<Bitmap> = _videoFrameFlow.asSharedFlow()
 
-             // Only apply sampling if a specific delay is requested.
-             // If delay is 0, we consume as fast as possible (sequentially).
              if (FRAME_DELAY_MS > 0) {
                  flow = flow.sample(FRAME_DELAY_MS)
              }
 
              flow.collect { bitmap ->
-                 // Check state again because collection continues until job cancelled
                  if (_uiState.value.isStreamingToServer) {
-                     // This suspends until the frame is fully compressed and sent.
-                     // During suspension, _videoFrameFlow (DROP_OLDEST) discards intermediate frames.
-                     // On resume, we pick up the latest frame.
                      sendFrameToServer(bitmap)
                  }
              }
         }
 
-        Log.d(TAG, "Started server streaming")
+        Log.d(TAG, "Started remote server streaming")
     }
 
     /**
@@ -277,6 +558,8 @@ class StreamViewModel(
     fun stopServerStreaming() {
         frameStreamingJob?.cancel()
         frameStreamingJob = null
+        localProcessingJob?.cancel()
+        localProcessingJob = null
 
         // Stop any pending TTS (matches web client behavior)
         ttsManager.stop()
@@ -289,7 +572,7 @@ class StreamViewModel(
             )
         }
 
-        Log.d(TAG, "Stopped server streaming")
+        Log.d(TAG, "Stopped streaming")
     }
 
     /**
@@ -392,13 +675,37 @@ class StreamViewModel(
     }
 
     /**
-     * Toggle audio streaming on/off.
+     * Toggle microphone on/off.
+     *
+     * Enabling: always starts voice-command recognition (MLKit), and additionally
+     * streams PCM audio to the server if a server connection is already open.
+     * Disabling: stops both voice commands and server audio streaming.
      */
     fun toggleAudioStreaming() {
         if (_uiState.value.isAudioStreaming) {
-            stopAudioStreaming()
+            // Stop voice commands and server audio
+            stopVoiceCommands()
+            audioStreamManager.stopRecording()
+            if (wearablesViewModel.serverRepository.isConnected()) {
+                wearablesViewModel.serverRepository.sendAudioStop()
+            }
+            _uiState.update { it.copy(isAudioStreaming = false, statusMessage = "Microphone off") }
+            Log.d(TAG, "Microphone disabled")
         } else {
-            startAudioStreaming()
+            if (!audioStreamManager.hasRecordingPermission()) {
+                _uiState.update { it.copy(errorMessage = "Microphone permission required") }
+                return
+            }
+            // Voice commands always start with the mic
+            startVoiceCommands()
+            // Server audio streaming only when connected
+            if (wearablesViewModel.serverRepository.isConnected()) {
+                audioStreamManager.startRecording { chunk ->
+                    wearablesViewModel.serverRepository.sendAudioChunk(chunk)
+                }
+            }
+            _uiState.update { it.copy(isAudioStreaming = true, statusMessage = "Microphone on") }
+            Log.d(TAG, "Microphone enabled")
         }
     }
 
@@ -488,6 +795,88 @@ class StreamViewModel(
     // ========== Photo Capture Methods ==========
 
     fun capturePhoto() {
+        val selectedProcessorId = wearablesViewModel.uiState.value.selectedProcessorId
+
+        // For VizLens processor, camera button triggers OCR re-scan instead of photo capture
+        val processor = OnDeviceProcessorManager.getProcessor(selectedProcessorId)
+        if (processor is com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.vizlens.VizLensProcessor) {
+            Log.d(TAG, "VizLens: Triggering OCR re-scan")
+            processor.resetScene()
+            _uiState.update { it.copy(statusMessage = "Re-scanning text...") }
+            return
+        }
+
+        // For Panorama processor: 4-way state machine on camera button
+        if (processor is com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor) {
+            when {
+                processor.isCapturing -> {
+                    // ── Stop sweep ───────────────────────────────────────────
+                    Log.d(TAG, "Panorama: stopping sweep")
+                    processor.stopPanorama()
+                    _uiState.update { it.copy(
+                        statusMessage = "Stitching panorama…",
+                        captureButtonMode = CaptureButtonMode.CAMERA,
+                    ) }
+                    // process() handles stopRequested on the next frame and returns
+                    // "Panorama complete, N frames stitched". handleLocalProcessorResult()
+                    // detects that text and calls finishPanoramaCapture() to cancel the
+                    // job without clearing processedFrame (the stitched result).
+                }
+
+                processor.phase == com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaPhase.REALITY_PROXY -> {
+                    // ── Exit Reality Proxy ───────────────────────────────────
+                    Log.d(TAG, "Panorama: exiting Reality Proxy")
+                    processor.exitRealityProxy()
+                    finishPanoramaCapture()   // cancels localProcessingJob, preserves processedFrame
+                    // Hierarchy was already built before entering RP — restore DONE state directly.
+                    _uiState.update { it.copy(
+                        captureButtonMode = CaptureButtonMode.PANORAMA_DONE,
+                        statusMessage = "Panorama ready — tap camera to enter proxy mode",
+                    ) }
+                }
+
+                processor.hasStitchedResult -> {
+                    // ── Enter Reality Proxy ──────────────────────────────────
+                    Log.d(TAG, "Panorama: entering Reality Proxy")
+                    resumeVideoCapture()   // restart camera feed (was paused after stitch)
+                    if (!_uiState.value.isStreamingToServer) startServerStreaming()
+                    processor.enterRealityProxy()
+                    _uiState.update { it.copy(
+                        statusMessage = "Reality Proxy — look at objects",
+                        captureButtonMode = CaptureButtonMode.PROXY_ACTIVE,
+                    ) }
+                }
+
+                else -> {
+                    // ── Start new sweep ──────────────────────────────────────
+                    Log.d(TAG, "Panorama: starting sweep")
+                    hierarchyReadyJob?.cancel()
+                    hierarchyReadyJob = null
+                    // Clear the previous stitch from processedFrame BEFORE state.reset() runs,
+                    // then hint GC to release the potentially 200+ MB stitch bitmap before
+                    // the new session starts allocating keyframe copies.
+                    _uiState.update { it.copy(processedFrame = null) }
+                    System.gc()
+                    if (!_uiState.value.isStreamingToServer) startServerStreaming()
+                    processor.startPanorama()
+                    _uiState.update { it.copy(
+                        statusMessage = "Panorama sweep started — pan slowly",
+                        captureButtonMode = CaptureButtonMode.RECORDING,
+                    ) }
+                }
+            }
+            return
+        }
+
+        // For VideoSegmentation processor, camera button triggers object tracking
+        if (processor is com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.videosegmentation.VideoSegmentationProcessor) {
+            Log.d(TAG, "VideoSegmentation: Triggering track")
+            processor.requestTrack()
+            _uiState.update { it.copy(statusMessage = "Tracking object...") }
+            return
+        }
+
+        // For other processors, capture photo normally
         if (uiState.value.streamSessionState == StreamSessionState.STREAMING) {
             viewModelScope.launch {
                 streamSession?.capturePhoto()?.onSuccess { handlePhotoData(it) }
@@ -560,7 +949,7 @@ class StreamViewModel(
         val image = YuvImage(nv21, ImageFormat.NV21, videoFrame.width, videoFrame.height, null)
         val out =
             ByteArrayOutputStream().use { stream ->
-                image.compressToJpeg(Rect(0, 0, videoFrame.width, videoFrame.height), 50, stream)
+                image.compressToJpeg(Rect(0, 0, videoFrame.width, videoFrame.height), 95, stream)
                 stream.toByteArray()
             }
 
@@ -682,6 +1071,119 @@ class StreamViewModel(
         }
     }
 
+    // ========== Voice Command Methods ==========
+
+    private var voiceTranscriptJob: Job? = null
+    private var voiceActiveJob: Job? = null
+
+    private fun startVoiceCommands() {
+        voiceCommandManager.start { command ->
+            handleVoiceCommand(command)
+        }
+
+        // Collect transcript updates
+        voiceTranscriptJob = viewModelScope.launch {
+            voiceCommandManager.transcript.collect { transcript ->
+                _uiState.update { it.copy(voiceTranscript = transcript) }
+            }
+        }
+
+        // Collect active state
+        voiceActiveJob = viewModelScope.launch {
+            voiceCommandManager.isActive.collect { isActive ->
+                _uiState.update { it.copy(isVoiceListening = isActive) }
+            }
+        }
+
+        Log.d(TAG, "Voice commands started")
+    }
+
+    private fun stopVoiceCommands() {
+        voiceTranscriptJob?.cancel()
+        voiceTranscriptJob = null
+        voiceActiveJob?.cancel()
+        voiceActiveJob = null
+        voiceCommandManager.stop()
+        _uiState.update { it.copy(voiceTranscript = "", isVoiceListening = false) }
+        Log.d(TAG, "Voice commands stopped")
+    }
+
+    private fun handleVoiceCommand(command: VoiceCommandManager.VoiceCommand) {
+        when (command) {
+            is VoiceCommandManager.VoiceCommand.StartProcessor -> {
+                Log.d(TAG, "Voice command: start processor ${command.processorName}")
+                // Select the processor
+                wearablesViewModel.selectProcessor(command.processorId)
+                
+                // Restart processing to use the new processor
+                if (_uiState.value.isStreamingToServer) {
+                    stopServerStreaming()
+                }
+                startServerStreaming()
+            }
+            is VoiceCommandManager.VoiceCommand.StopProcessing -> {
+                Log.d(TAG, "Voice command: stop processing")
+                if (_uiState.value.isStreamingToServer) {
+                    stopServerStreaming()
+                }
+            }
+            is VoiceCommandManager.VoiceCommand.TakePhoto -> {
+                Log.d(TAG, "Voice command: take photo / scan")
+                // This will trigger VizLens OCR re-scan if VizLens is active,
+                // or take a photo for other processors
+                capturePhoto()
+            }
+            is VoiceCommandManager.VoiceCommand.Track -> {
+                Log.d(TAG, "Voice command: track object")
+                val selectedProcessorId = wearablesViewModel.uiState.value.selectedProcessorId
+                val processor = OnDeviceProcessorManager.getProcessor(selectedProcessorId)
+                if (processor is com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.videosegmentation.VideoSegmentationProcessor) {
+                    processor.requestTrack()
+                    _uiState.update { it.copy(statusMessage = "Tracking object...") }
+                } else {
+                    // If not on VideoSegmentation processor, treat "track" as photo/scan
+                    capturePhoto()
+                }
+            }
+            is VoiceCommandManager.VoiceCommand.StopTracking -> {
+                Log.d(TAG, "Voice command: stop tracking")
+                val selectedProcessorId = wearablesViewModel.uiState.value.selectedProcessorId
+                val processor = OnDeviceProcessorManager.getProcessor(selectedProcessorId)
+                if (processor is com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.videosegmentation.VideoSegmentationProcessor) {
+                    processor.requestStopTrack()
+                    _uiState.update { it.copy(statusMessage = "Tracking stopped") }
+                }
+            }
+            is VoiceCommandManager.VoiceCommand.StartPanoramaCapture -> {
+                Log.d(TAG, "Voice command: start panorama sweep")
+                val selectedProcessorId = wearablesViewModel.uiState.value.selectedProcessorId
+                val processor = OnDeviceProcessorManager.getProcessor(selectedProcessorId)
+                    as? com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
+                    ?: return
+                if (!processor.isCapturing) {
+                    // Reuse capturePhoto() — its else branch handles the full start flow
+                    // (clears old stitch, starts server streaming, starts capture).
+                    capturePhoto()
+                } else {
+                    Log.d(TAG, "StartPanoramaCapture ignored — already capturing")
+                }
+            }
+            is VoiceCommandManager.VoiceCommand.StopPanoramaCapture -> {
+                Log.d(TAG, "Voice command: stop panorama sweep")
+                val selectedProcessorId = wearablesViewModel.uiState.value.selectedProcessorId
+                val processor = OnDeviceProcessorManager.getProcessor(selectedProcessorId)
+                    as? com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
+                    ?: return
+                if (processor.isCapturing) {
+                    // Reuse capturePhoto() — its isCapturing branch calls stopPanorama().
+                    capturePhoto()
+                } else {
+                    Log.d(TAG, "StopPanoramaCapture ignored — not currently capturing")
+                }
+            }
+        }
+    }
+
     fun clearError() {
         _uiState.update { it.copy(errorMessage = null) }
     }
@@ -696,6 +1198,7 @@ class StreamViewModel(
         audioStreamManager.cleanup()
         audioPlaybackManager.cleanup()
         ttsManager.cleanup()
+        voiceCommandManager.cleanup()
     }
 
     class Factory(

@@ -25,6 +25,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.PanoramaProcessor
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.CaptureButtonMode
+import me.saket.telephoto.zoomable.rememberZoomableState
+import me.saket.telephoto.zoomable.zoomable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -32,9 +37,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.processor.panorama.SavedPanorama
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.meta.wearable.dat.camera.types.StreamSessionState
@@ -81,6 +94,10 @@ fun StreamScreen(
         onCapturePhoto = { streamViewModel.capturePhoto() },
         onSharePhoto = { streamViewModel.sharePhoto(it) },
         onHideShareDialog = { streamViewModel.hideShareDialog() },
+        onShowPanoramaPicker = { streamViewModel.showPanoramaPicker() },
+        onHidePanoramaPicker = { streamViewModel.hidePanoramaPicker() },
+        onLoadSavedPanorama = { streamViewModel.loadSavedPanorama(it) },
+        onDeleteSavedPanorama = { streamViewModel.deleteSavedPanorama(it) },
         modifier = modifier
     )
 }
@@ -99,17 +116,50 @@ fun StreamScreenContent(
     onCapturePhoto: () -> Unit,
     onSharePhoto: (Bitmap) -> Unit,
     onHideShareDialog: () -> Unit,
+    onShowPanoramaPicker: () -> Unit,
+    onHidePanoramaPicker: () -> Unit,
+    onLoadSavedPanorama: (String) -> Unit,
+    onDeleteSavedPanorama: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // Zoomable state for the panorama result viewer. Declared unconditionally per
+    // Compose rules; only wired up when captureButtonMode == PANORAMA_DONE / ANALYZING.
+    val panoramaZoomState = rememberZoomableState()
+
     Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
         // Video frame display (prefer processed frame if streaming to server)
         streamUiState.displayFrame?.let { frame ->
-            Image(
-                bitmap = frame.asImageBitmap(),
-                contentDescription = stringResource(R.string.live_stream),
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Inside,
-            )
+            when (streamUiState.captureButtonMode) {
+                CaptureButtonMode.PANORAMA_ANALYZING,
+                CaptureButtonMode.PANORAMA_DONE -> {
+                    // Stitched panorama: full pan/pinch-zoom viewer
+                    Image(
+                        bitmap = frame.asImageBitmap(),
+                        contentDescription = stringResource(R.string.live_stream),
+                        modifier = Modifier.fillMaxSize().zoomable(panoramaZoomState),
+                        contentScale = ContentScale.Fit,
+                    )
+                }
+                CaptureButtonMode.PROXY_ACTIVE -> {
+                    // Reality Proxy: renderer draws its own overlay (no touch zoom;
+                    // head movement is the navigation modality)
+                    Image(
+                        bitmap = frame.asImageBitmap(),
+                        contentDescription = stringResource(R.string.live_stream),
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Fit,
+                    )
+                }
+                else -> {
+                    // Live camera feed or in-progress processor overlay
+                    Image(
+                        bitmap = frame.asImageBitmap(),
+                        contentDescription = stringResource(R.string.live_stream),
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Inside,
+                    )
+                }
+            }
         }
 
         // Loading indicator when starting
@@ -142,10 +192,11 @@ fun StreamScreenContent(
                     activeColor = AppColor.Green
                 )
 
-                // Audio streaming status
+                // Audio streaming status (includes voice commands)
+                val isMicActive = streamUiState.isAudioStreaming || streamUiState.isVoiceListening
                 StatusChip(
-                    label = if (streamUiState.isAudioStreaming) "Mic On" else "Mic Off",
-                    isActive = streamUiState.isAudioStreaming,
+                    label = if (isMicActive) "Mic On" else "Mic Off",
+                    isActive = isMicActive,
                     activeColor = AppColor.Green
                 )
 
@@ -162,7 +213,7 @@ fun StreamScreenContent(
                 processors = wearablesUiState.processors,
                 selectedProcessorId = wearablesUiState.selectedProcessorId,
                 onProcessorSelected = onProcessorSelected,
-                enabled = wearablesUiState.isConnectedToServer
+                enabled = wearablesUiState.processors.isNotEmpty()
             )
 
             // Response text display
@@ -203,8 +254,9 @@ fun StreamScreenContent(
             }
         }
 
-        // Bottom controls
-        Column(
+        // Bottom controls — hidden in Reality Proxy mode so the rendered overlay
+        // (which draws its own detail panel) is fully visible.
+        if (streamUiState.captureButtonMode != CaptureButtonMode.PROXY_ACTIVE) Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.BottomCenter)
@@ -233,8 +285,9 @@ fun StreamScreenContent(
                     onClick = onCycleTimerMode,
                 )
 
-                // Photo capture button
+                // Photo capture button (icon/color reflect current processor phase)
                 CaptureButton(
+                    mode = streamUiState.captureButtonMode,
                     onClick = onCapturePhoto,
                 )
             }
@@ -268,7 +321,7 @@ fun StreamScreenContent(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = if (streamUiState.isStreamingToServer) "Stop Server" else "Start Server",
+                        text = if (streamUiState.isStreamingToServer) "Stop Processing" else "Start Processing",
                         maxLines = 1
                     )
                 }
@@ -298,6 +351,20 @@ fun StreamScreenContent(
                     Text(
                         text = if (streamUiState.isAudioStreaming) "Stop Audio" else "Start Audio",
                         maxLines = 1
+                    )
+                }
+
+                // Saved panorama gallery picker — only relevant for Panorama processor
+                if (wearablesUiState.selectedProcessorId == PanoramaProcessor.PROCESSOR_ID) IconButton(
+                    onClick = onShowPanoramaPicker,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .background(AppColor.DeepBlue, RoundedCornerShape(8.dp))
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PhotoLibrary,
+                        contentDescription = "Saved panoramas",
+                        tint = Color.White
                     )
                 }
 
@@ -338,6 +405,38 @@ fun StreamScreenContent(
                 textAlign = TextAlign.Center,
             )
         }
+
+        // Voice transcript display (tiny text at very bottom)
+        if (streamUiState.isVoiceListening || streamUiState.voiceTranscript.isNotEmpty()) {
+            Text(
+                text = streamUiState.voiceTranscript.ifEmpty { "🎤 listening..." },
+                color = Color.Gray,
+                fontSize = 8.sp,
+                maxLines = 1,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 4.dp),
+                textAlign = TextAlign.Center,
+            )
+        }
+
+        // Floating exit button — only visible in Reality Proxy mode (bottom controls are
+        // hidden there, so we render the yellow ✕ button as a standalone overlay).
+        if (streamUiState.captureButtonMode == CaptureButtonMode.PROXY_ACTIVE) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 16.dp)
+                    .size(56.dp)
+            ) {
+                CaptureButton(
+                    mode = CaptureButtonMode.PROXY_ACTIVE,
+                    onClick = onCapturePhoto,
+                )
+            }
+        }
     }
 
     // Photo share dialog
@@ -352,6 +451,16 @@ fun StreamScreenContent(
                 },
             )
         }
+    }
+
+    // Saved panorama picker dialog
+    if (streamUiState.showPanoramaPicker) {
+        PanoramaPickerDialog(
+            panoramas = streamUiState.savedPanoramas,
+            onSelect = onLoadSavedPanorama,
+            onDelete = onDeleteSavedPanorama,
+            onDismiss = onHidePanoramaPicker,
+        )
     }
 }
 
@@ -370,7 +479,91 @@ private fun StreamScreenPreview() {
         onCycleTimerMode = {},
         onCapturePhoto = {},
         onSharePhoto = {},
-        onHideShareDialog = {}
+        onHideShareDialog = {},
+        onShowPanoramaPicker = {},
+        onHidePanoramaPicker = {},
+        onLoadSavedPanorama = {},
+        onDeleteSavedPanorama = {},
+    )
+}
+
+@Composable
+private fun PanoramaPickerDialog(
+    panoramas: List<SavedPanorama>,
+    onSelect: (String) -> Unit,
+    onDelete: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val dateFormat = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Saved Panoramas") },
+        text = {
+            if (panoramas.isEmpty()) {
+                Text(
+                    text = "No saved panoramas yet.\nComplete a panorama sweep to save one automatically.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.Gray,
+                )
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(panoramas, key = { it.id }) { pano ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color.DarkGray.copy(alpha = 0.4f))
+                                .clickable { onSelect(pano.id) }
+                                .padding(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            // Thumbnail
+                            pano.thumbnailBitmap?.let { thumb ->
+                                Image(
+                                    bitmap = thumb.asImageBitmap(),
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(width = 96.dp, height = 54.dp)
+                                        .clip(RoundedCornerShape(4.dp)),
+                                    contentScale = ContentScale.Crop,
+                                )
+                            } ?: Box(
+                                modifier = Modifier
+                                    .size(width = 96.dp, height = 54.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color.Gray.copy(alpha = 0.5f))
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = dateFormat.format(Date(pano.timestamp)),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = Color.White,
+                                )
+                                Text(
+                                    text = "${pano.nodeCount} region${if (pano.nodeCount == 1) "" else "s"}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.Gray,
+                                )
+                            }
+                            androidx.compose.material3.IconButton(
+                                onClick = { onDelete(pano.id) },
+                                modifier = Modifier.size(36.dp),
+                            ) {
+                                androidx.compose.material3.Icon(
+                                    imageVector = Icons.Default.Delete,
+                                    contentDescription = "Delete",
+                                    tint = Color.Red.copy(alpha = 0.8f),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Close") }
+        },
     )
 }
 

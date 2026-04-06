@@ -15,6 +15,11 @@ okhttp = "4.12.0"
 retrofit = "2.9.0"
 gson = "2.10.1"
 coroutines = "1.7.3"
+# On-device ML dependencies
+litert = "1.4.1"
+mediapipeTasks = "0.10.14"
+litertlm = "0.9.0-alpha02"
+telephoto = "0.13.0"
 
 [libraries]
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
@@ -39,6 +44,15 @@ gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
 ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+# On-device ML libraries
+litert = { group = "com.google.ai.edge.litert", name = "litert", version.ref = "litert" }
+litert-gpu = { group = "com.google.ai.edge.litert", name = "litert-gpu", version.ref = "litert" }
+litert-support = { group = "com.google.ai.edge.litert", name = "litert-support", version.ref = "litert" }
+mediapipe-tasks-vision = { group = "com.google.mediapipe", name = "tasks-vision", version.ref = "mediapipeTasks" }
+litertlm-android = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version.ref = "litertlm" }
+telephoto-zoomable = { group = "me.saket.telephoto", name = "zoomable", version.ref = "telephoto" }
+
+androidx-webkit = { group = "androidx.webkit", name = "webkit", version = "1.12.1" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
