@@ -4,6 +4,8 @@ An open-source Android app that connects Ray-Ban Meta smart glasses to **your ow
 
 Bypasses Meta’s cloud AI and streams live video + audio directly from the glasses to your self-hosted backend via WebSocket + REST or Android MLKit on-device AI.
 
+If you are contributing to this project during a Hackathon, read [Hackathon.md](Hackathon.md)
+
 ## Features
 
 - Full Meta Wearables DAT SDK integration (camera stream, photo capture, device state)
