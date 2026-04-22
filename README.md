@@ -59,5 +59,3 @@ MainActivity.kt                    → Permission handling
 ## License
 
 MIT (same as original Meta Wearables DAT SDK) – see LICENSE
-
-Ready for further features (e.g. photo capture trigger, haptic feedback, offline mode). Let me know what to add next!
